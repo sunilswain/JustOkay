@@ -118,17 +118,32 @@ python bhulekh_scraper.py --url "http://bhulekh.ori.nic.in"
 
 ## Command Line Arguments
 
-- `--district`: District name or value to start from (optional)
-- `--tahasil`: Tahasil name or value to start from (optional, requires --district)
-- `--village`: Village name or value to start from (optional, requires --district and --tahasil)
-- `--headless`: Run browser in headless mode (no GUI)
-- `--browser`: Browser to use - 'chromium', 'firefox', 'webkit', or 'brave' (default: chromium)
-- `--brave-path`: Path to Brave browser executable (required if Brave not in default location)
-- `--connect-browser`: CDP endpoint URL to connect to existing browser (e.g., http://localhost:9222)
-- `--persistent`: Use persistent browser context (saves cookies/session to avoid timeouts)
-- `--user-data-dir`: Directory for persistent browser data (default: browser_data)
-- `--debug`: Enable debug mode (saves page content and screenshots on errors)
-- `--url`: Base URL of the website (default: http://bhulekh.ori.nic.in)
+All options are **command-line only** (no config file required). For a full reference and examples, see **MAN.md** or run:
+
+```bash
+python bhulekh_scraper.py --help
+python bhulekh_scraper.py --version
+```
+
+| Option | Description |
+|--------|-------------|
+| `--district` | District name or value to start from |
+| `--tahasil` | Tahasil name or value (use with --district) |
+| `--village` | Village name or value (use with --district, --tahasil) |
+| `--headless` | Run browser without GUI |
+| `--browser` | `chromium`, `firefox`, `webkit`, or `brave` (default: chromium) |
+| `--brave-path` | Path to Brave executable |
+| `--connect-browser` | CDP URL (e.g. http://localhost:9222) |
+| `--persistent` | Save cookies/session to avoid timeouts |
+| `--user-data-dir` | Persistent data directory (default: browser_data) |
+| `--debug` | Save page/screenshots on errors |
+| `--dry-run` | Process only 3 Khatiyans then stop |
+| `--limit-khatiyans N` | Stop after N Khatiyans |
+| `--url` | Base URL (default: http://bhulekh.ori.nic.in) |
+| `--version` | Show version and exit |
+| `--help` | Show help and exit |
+
+**Expiry (for .exe):** An optional expiry date can be set in the script (`EXPIRY_DATE`). After that date the program refuses to run (exit code 1); `--help` and `--version` still work. Set `EXPIRY_DATE = None` to disable.
 
 ## Output
 
@@ -240,6 +255,18 @@ If the website is detecting and blocking automation:
 5. **Slower scraping**: The script already includes delays, but you can increase them in the code if needed.
 
 6. **Check for Cloudflare/DDoS protection**: Some sites use Cloudflare which can block automation. Using persistent context with your real browser profile helps.
+
+## Building an Executable (.exe)
+
+You can convert the script to a Windows executable with **PyInstaller** so it can run without installing Python.
+
+1. Install PyInstaller: `pip install pyinstaller`
+2. Build: `pyinstaller bhulekh_scraper.spec`
+3. Run: `dist\bhulekh_scraper.exe --help` (same options as the script)
+
+**Note:** The .exe does not include Playwright’s browser. On the PC where the exe runs, Chromium must be installed once (e.g. run `playwright install chromium` from a Python environment, or see BUILD.md for options).
+
+Full steps, Playwright-on-target-PC options, and troubleshooting: **[BUILD.md](BUILD.md)**.
 
 ## License
 

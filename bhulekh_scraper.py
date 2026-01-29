@@ -3,6 +3,16 @@ Bhulekh RoR Data Scraper
 Automates the process of fetching RoR (Record of Rights) data from the Bhulekh website.
 """
 
+import os
+import sys
+
+# When running as .exe (PyInstaller), use shared browser path from install_browsers.exe
+if getattr(sys, "frozen", False):
+    _apd = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+    if _apd:
+        _browsers_path = os.path.join(_apd, "BhulekhScraper", "browsers")
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _browsers_path)
+
 import asyncio
 import pandas as pd
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
@@ -12,6 +22,12 @@ import time
 import json
 from pathlib import Path
 import random
+from datetime import date
+
+# Expiry: program will refuse to run after this date (useful for .exe builds).
+# Set to None to disable expiry check.
+EXPIRY_DATE = date(2026, 1, 31)  # YYYY, MM, DD
+VERSION = "1.0.0"
 
 # Configure logging (UTF-8 so Odia/Unicode log messages don't fail on Windows)
 def _setup_logging():
@@ -253,17 +269,44 @@ class BhulekhScraper:
                 if self.browser_type == 'brave':
                     persistent_options['executable_path'] = self.brave_executable_path
                 
-                self.context = await browser_launcher.launch_persistent_context(**persistent_options)
+                try:
+                    self.context = await browser_launcher.launch_persistent_context(**persistent_options)
+                except Exception as e:
+                    err_msg = str(e)
+                    if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                        raise RuntimeError(
+                            "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
+                            "Then run bhulekh_scraper.exe again."
+                        ) from e
+                    raise
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
                 self.browser = None  # No browser object for persistent context
             else:
                 logger.warning(f"Persistent context not fully supported for {self.browser_type}, using regular context")
-                self.browser = await browser_launcher.launch(**launch_options)
+                try:
+                    self.browser = await browser_launcher.launch(**launch_options)
+                except Exception as e:
+                    err_msg = str(e)
+                    if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                        raise RuntimeError(
+                            "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
+                            "Then run bhulekh_scraper.exe again."
+                        ) from e
+                    raise
                 self.context = await self.browser.new_context(**context_options)
                 self.page = await self.context.new_page()
         else:
             # Regular context
-            self.browser = await browser_launcher.launch(**launch_options)
+            try:
+                self.browser = await browser_launcher.launch(**launch_options)
+            except Exception as e:
+                err_msg = str(e)
+                if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                    raise RuntimeError(
+                        "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
+                        "Then run bhulekh_scraper.exe again."
+                    ) from e
+                raise
             self.context = await self.browser.new_context(**context_options)
             self.page = await self.context.new_page()
         
@@ -1199,34 +1242,63 @@ class BhulekhScraper:
 
 
 async def main():
-    """Main entry point."""
+    """Main entry point. All options are available as command-line arguments."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Bhulekh RoR Data Scraper')
-    parser.add_argument('--district', type=str, help='District name or value to start from')
-    parser.add_argument('--tahasil', type=str, help='Tahasil name or value to start from')
-    parser.add_argument('--village', type=str, help='Village name or value to start from')
-    parser.add_argument('--headless', action='store_true', help='Run in headless mode')
-    parser.add_argument('--url', type=str, default='http://bhulekh.ori.nic.in', help='Base URL of the website')
-    parser.add_argument('--browser', type=str, choices=['chromium', 'firefox', 'webkit', 'brave'], 
-                       default='chromium', help='Browser to use (default: chromium)')
-    parser.add_argument('--brave-path', type=str, 
-                       help='Path to Brave browser executable (required if using --browser brave)')
-    parser.add_argument('--connect-browser', type=str,
-                       help='CDP endpoint URL to connect to existing browser (e.g., http://localhost:9222)')
-    parser.add_argument('--persistent', action='store_true', 
-                       help='Use persistent browser context (saves cookies/session)')
-    parser.add_argument('--user-data-dir', type=str, default='browser_data',
-                       help='Directory for persistent browser data (default: browser_data)')
+    import sys
+
+    epilog = """
+Examples:
+  python bhulekh_scraper.py
+  python bhulekh_scraper.py --district "4" --dry-run
+  python bhulekh_scraper.py --headless --limit-khatiyans 10
+  python bhulekh_scraper.py --browser brave --persistent
+
+Full command reference: see MAN.md or README.md
+"""
+    parser = argparse.ArgumentParser(
+        description='Bhulekh RoR Data Scraper — fetches Record of Rights from bhulekh.ori.nic.in.',
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--version', action='store_true', help='Show version and exit')
+    parser.add_argument('--district', type=str, metavar='NAME_OR_ID',
+                        help='District name or value to start from')
+    parser.add_argument('--tahasil', type=str, metavar='NAME_OR_ID',
+                        help='Tahasil name or value to start from (use with --district)')
+    parser.add_argument('--village', type=str, metavar='NAME_OR_ID',
+                        help='Village name or value to start from (use with --district, --tahasil)')
+    parser.add_argument('--headless', action='store_true',
+                        help='Run browser in headless mode (no GUI)')
+    parser.add_argument('--url', type=str, default='http://bhulekh.ori.nic.in', metavar='URL',
+                        help='Base URL of the website (default: http://bhulekh.ori.nic.in)')
+    parser.add_argument('--browser', type=str, choices=['chromium', 'firefox', 'webkit', 'brave'],
+                        default='chromium',
+                        help='Browser to use (default: chromium)')
+    parser.add_argument('--brave-path', type=str, metavar='PATH',
+                        help='Path to Brave executable (e.g. .../brave.exe)')
+    parser.add_argument('--connect-browser', type=str, metavar='URL',
+                        help='Connect to existing browser via CDP (e.g. http://localhost:9222)')
+    parser.add_argument('--persistent', action='store_true',
+                        help='Use persistent context (saves cookies/session)')
+    parser.add_argument('--user-data-dir', type=str, default='browser_data', metavar='DIR',
+                        help='Directory for persistent browser data (default: browser_data)')
     parser.add_argument('--debug', action='store_true',
-                       help='Enable debug mode (saves page content and screenshots on errors)')
+                        help='Save page content and screenshots on errors')
     parser.add_argument('--dry-run', action='store_true',
-                       help='Process only 3 Khatiyans then stop; file updates after each record')
+                        help='Process only 3 Khatiyans then stop; file updates after each record')
     parser.add_argument('--limit-khatiyans', type=int, metavar='N',
-                       help='Stop after processing N Khatiyans (file updates after each record)')
-    
+                        help='Stop after N Khatiyans (file updates after each record)')
+
     args = parser.parse_args()
-    
+
+    if args.version:
+        print(f"bhulekh_scraper {VERSION}")
+        sys.exit(0)
+
+    if EXPIRY_DATE is not None and date.today() > EXPIRY_DATE:
+        print(f"This program has expired (expiry date: {EXPIRY_DATE}).", file=sys.stderr)
+        sys.exit(1)
+
     limit = args.limit_khatiyans
     if args.dry_run and limit is None:
         limit = 3
