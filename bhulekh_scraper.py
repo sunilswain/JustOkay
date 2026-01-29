@@ -397,14 +397,14 @@ class BhulekhScraper:
         """Wait for page to fully load."""
         try:
             await self.page.wait_for_load_state('networkidle', timeout=timeout)
-            await self.human_delay(1.5, 2.5)  # Human-like delay after page load
+            await self.human_delay(0.2, 0.4)  # Minor delay after page load
             
             # Check for timeout errors
             if await self.check_for_timeout_error():
                 raise Exception("Website timeout error detected")
         except PlaywrightTimeoutError:
             logger.warning("Page load timeout, continuing anyway")
-            await self.human_delay(1.0, 2.0)
+            await self.human_delay(0.2, 0.4)
     
     async def select_dropdown(self, selector: str, value: str, wait_for_update: bool = True):
         """Select a value from a dropdown and wait for dependent fields to update."""
@@ -413,7 +413,7 @@ class BhulekhScraper:
             try:
                 dropdown = self.page.locator(selector)
                 await dropdown.hover()
-                await self.human_delay(0.3, 0.7)
+                await self.human_delay(0.15, 0.35)
             except:
                 pass
             
@@ -421,14 +421,11 @@ class BhulekhScraper:
             await self.page.select_option(selector, value)
             logger.info(f"Selected {value} from {selector}")
             
-            # Human-like delay before waiting for update
-            await self.human_delay(0.5, 1.0)
+            await self.human_delay(0.2, 0.4)
             
             if wait_for_update:
-                # Wait for postback to complete
                 await self.wait_for_page_load()
-                # Additional wait for ASP.NET postback with human-like delay
-                await self.human_delay(2.0, 3.5)
+                await self.human_delay(0.3, 0.6)
         except Exception as e:
             logger.error(f"Error selecting dropdown {selector}: {e}")
             raise
@@ -448,7 +445,7 @@ class BhulekhScraper:
             while time.time() < deadline:
                 if await _check():
                     return True
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
             logger.warning(f"Dropdown {selector} did not populate within {timeout_ms}ms")
             return False
         except Exception as e:
@@ -506,8 +503,8 @@ class BhulekhScraper:
             is_disabled = await radio.get_attribute('disabled')
             if is_disabled:
                 logger.info("Search type radio is disabled; waiting for it to enable (e.g. after Tahsil loads)...")
-                for _ in range(15):  # Wait up to ~15 * 1.5s
-                    await self.human_delay(1.0, 2.0)
+                for _ in range(20):
+                    await self.human_delay(0.3, 0.6)
                     is_disabled = await radio.get_attribute('disabled')
                     if not is_disabled:
                         break
@@ -515,7 +512,7 @@ class BhulekhScraper:
                 logger.warning("Search type radio still disabled; assuming Khatiyan mode and continuing.")
             else:
                 await radio.hover()
-                await self.human_delay(0.3, 0.7)
+                await self.human_delay(0.15, 0.35)
                 await radio.check()
 
             await self.wait_for_page_load()
@@ -530,12 +527,11 @@ class BhulekhScraper:
             # First, visit a simple page to establish session (like a real user)
             logger.info("Establishing browser session...")
             await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=30000)
-            await self.human_delay(2.0, 4.0)  # Human-like delay
+            await self.human_delay(0.4, 0.8)
             
-            # Simulate some mouse movement (human behavior)
             try:
                 await self.page.mouse.move(random.randint(100, 500), random.randint(100, 500))
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                await asyncio.sleep(random.uniform(0.2, 0.5))
             except:
                 pass
             
@@ -554,8 +550,7 @@ class BhulekhScraper:
                 referer=self.base_url + '/'
             )
             
-            # Wait a bit before checking page load
-            await self.human_delay(1.0, 2.0)
+            await self.human_delay(0.3, 0.6)
             await self.wait_for_page_load()
             
             # Check if we're actually on the page (look for key elements)
@@ -601,12 +596,12 @@ class BhulekhScraper:
                 # Check for timeout error
                 if await self.check_for_timeout_error():
                     logger.warning("Timeout error detected, retrying navigation...")
-                    await self.human_delay(5, 8)  # Longer delay before retry
+                    await self.human_delay(1.0, 2.0)  # Brief delay before retry
                     
                     # Clear cookies and try again
                     await self.context.clear_cookies()
                     await self.page.goto(self.base_url, wait_until='domcontentloaded', timeout=30000)
-                    await self.human_delay(3, 5)
+                    await self.human_delay(0.8, 1.5)
                     await self.page.goto(self.start_url, wait_until='domcontentloaded', timeout=60000)
                     await self.wait_for_page_load()
                     
@@ -763,10 +758,9 @@ class BhulekhScraper:
     async def click_view_ror(self):
         """Click the View RoR button with human-like behavior."""
         try:
-            # Hover over button first (human behavior)
             button = self.page.locator('input[id*="btnRORFront"]')
             await button.hover()
-            await self.human_delay(0.3, 0.8)
+            await self.human_delay(0.15, 0.4)
             
             # Click the button
             await button.click()
@@ -787,23 +781,19 @@ class BhulekhScraper:
             # Wait for button to be available
             await self.page.wait_for_selector('input[id="btnKhatiyan"]', timeout=10000)
             
-            # Hover first (human behavior)
             button = self.page.locator('input[id="btnKhatiyan"]')
             await button.hover()
-            await self.human_delay(0.3, 0.7)
+            await self.human_delay(0.15, 0.35)
             
-            # Click the button
             await button.click()
             await self.wait_for_page_load()
             
-            # Check for timeout error
             if await self.check_for_timeout_error():
                 logger.warning("Timeout error after clicking Khatiyan Page, navigating to main page...")
                 await self.navigate_to_ror_page()
                 return
             
-            # Wait a bit more for the form to reset (human-like delay)
-            await self.human_delay(2.0, 3.0)
+            await self.human_delay(0.3, 0.6)
             logger.info("Clicked Khatiyan Page button (back)")
         except Exception as e:
             logger.error(f"Error clicking Khatiyan Page button: {e}")
@@ -821,14 +811,12 @@ class BhulekhScraper:
             try:
                 # Select the Khatiyan
                 await self.select_dropdown(SELECTOR_KHATIYAN, khatiyan_value, wait_for_update=False)
-                await self.human_delay(1.0, 2.0)
+                await self.human_delay(0.3, 0.6)
                 
-                # Click View RoR button
                 await self.click_view_ror()
                 
-                # Wait for RoR page to load
                 await self.wait_for_page_load()
-                await self.human_delay(2.0, 3.5)
+                await self.human_delay(0.4, 0.7)
                 
                 # Check for timeout error before extracting
                 if await self.check_for_timeout_error():
@@ -840,7 +828,7 @@ class BhulekhScraper:
                         await self.select_dropdown(SELECTOR_TAHASIL, tahasil, wait_for_update=True)
                         await self.select_dropdown(SELECTOR_VILLAGE, village, wait_for_update=True)
                         await self.select_search_type("Khatiyan")
-                        await self.human_delay(2.0, 3.0)
+                        await self.human_delay(0.5, 1.0)
                         continue
                     else:
                         raise Exception("Timeout error persists after retries")
@@ -865,19 +853,16 @@ class BhulekhScraper:
                     await self.save_data()
                     logger.info(f"File updated: {total} record(s) in bhulekh_data.json / bhulekh_data.csv")
                 
-                # Go back to Khatiyan selection page
                 await self.click_khatiyan_page()
                 await self.wait_for_page_load()
-                
-                # Human-like delay before next action
-                await self.human_delay(1.5, 2.5)
+                await self.human_delay(0.3, 0.6)
                 
                 return True
                 
             except Exception as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Error processing Khatiyan {khatiyan_value}, retrying (attempt {attempt + 1}/{max_retries}): {e}")
-                    await self.human_delay(3.0, 5.0)  # Longer delay before retry
+                    await self.human_delay(0.8, 1.5)
                     try:
                         await self.navigate_to_ror_page()
                     except:
@@ -899,7 +884,7 @@ class BhulekhScraper:
             if not await self.wait_for_dropdown_populated(SELECTOR_KHATIYAN, min_options=1, timeout_ms=25000):
                 logger.warning(f"Khatiyan dropdown did not populate for village {village_text}, skipping")
                 return True
-            await self.human_delay(1.0, 2.0)
+            await self.human_delay(0.2, 0.4)
             
             # Get all Khatiyans
             khatiyan_options = await self.get_dropdown_options(SELECTOR_KHATIYAN)
@@ -918,7 +903,7 @@ class BhulekhScraper:
                 current_village = await self.page.evaluate("document.querySelector('#ctl00_ContentPlaceHolder1_ddlVillage')?.value || document.querySelector('select[id*=\"ddlVillage\"]')?.value || ''")
                 if current_village != village_value:
                     await self.select_dropdown(SELECTOR_VILLAGE, village_value)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.8)
                 
                 success = await self.process_khatiyan(
                     khatiyan['value'],
@@ -932,8 +917,7 @@ class BhulekhScraper:
                     logger.warning(f"Failed to process Khatiyan: {khatiyan['text']}")
                 if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                     break
-                # Human-like delay between Khatiyans
-                await self.human_delay(2.0, 4.0)
+                await self.human_delay(0.4, 0.8)
             
             return True
             
@@ -953,7 +937,7 @@ class BhulekhScraper:
             if not await self.wait_for_dropdown_populated(SELECTOR_VILLAGE, min_options=1, timeout_ms=25000):
                 logger.warning(f"Village dropdown did not populate for Tahasil {tahasil_text}, skipping")
                 return True
-            await self.human_delay(1.0, 2.0)
+            await self.human_delay(0.2, 0.4)
             
             # Get all villages
             village_options = await self.get_dropdown_options(SELECTOR_VILLAGE)
@@ -978,7 +962,7 @@ class BhulekhScraper:
                 current_tahasil = await self.page.evaluate("document.querySelector('#ctl00_ContentPlaceHolder1_ddlTahsil')?.value || document.querySelector('select[id*=\"ddlTahsil\"]')?.value || ''")
                 if current_tahasil != tahasil_value:
                     await self.select_dropdown(SELECTOR_TAHASIL, tahasil_value)
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.8)
                 
                 success = await self.process_village(
                     village['value'],
@@ -991,8 +975,7 @@ class BhulekhScraper:
                     logger.warning(f"Failed to process village: {village['text']}")
                 if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                     break
-                # Human-like delay between villages
-                await self.human_delay(3.0, 5.0)
+                await self.human_delay(0.5, 1.0)
             
             return True
             
@@ -1019,7 +1002,7 @@ class BhulekhScraper:
             logger.info("Waiting for Tahsil dropdown to populate...")
             if not await self.wait_for_dropdown_populated(SELECTOR_TAHASIL, min_options=1, timeout_ms=25000):
                 raise Exception("Tahsil dropdown did not populate after selecting district")
-            await self.human_delay(1.0, 2.0)
+            await self.human_delay(0.2, 0.4)
             
             # Get all Tahasils
             tahasil_options = await self.get_dropdown_options(SELECTOR_TAHASIL)
@@ -1059,8 +1042,7 @@ class BhulekhScraper:
                 # Reset start_village after first Tahasil
                 start_village_value = None
                 
-                # Human-like delay between Tahasils
-                await self.human_delay(4.0, 6.0)
+                await self.human_delay(0.8, 1.2)
             
             return True
             
@@ -1071,8 +1053,7 @@ class BhulekhScraper:
     async def cleanup(self):
         """Clean up browser resources."""
         try:
-            # Small delay to ensure all operations complete
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             
             if self.page:
                 try:
@@ -1126,7 +1107,7 @@ class BhulekhScraper:
             
             # Add initial delay to simulate human behavior
             logger.info("Initializing session...")
-            await self.human_delay(2.0, 4.0)
+            await self.human_delay(0.5, 1.0)
             
             # Navigate to the page
             await self.navigate_to_ror_page()
@@ -1175,7 +1156,7 @@ class BhulekhScraper:
                     if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                         logger.info(f"Reached limit of {self.limit_khatiyans} Khatiyan(s). Stopping.")
                         break
-                    await self.human_delay(5.0, 8.0)  # Longer delay between districts
+                    await self.human_delay(1.0, 2.0)
             
             # Save data to file (full save if not already saving per-record)
             await self.save_data()
