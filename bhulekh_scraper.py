@@ -6,12 +6,32 @@ Automates the process of fetching RoR (Record of Rights) data from the Bhulekh w
 import os
 import sys
 
-# When running as .exe (PyInstaller), use shared browser path from install_browsers.exe
+# Browser path: when exe = folder next to exe (no env). When script = AppData (shared with installers).
 if getattr(sys, "frozen", False):
+    # Exe: use "browsers" folder beside the exe — no dependency on LOCALAPPDATA
+    _browsers_path = os.path.join(os.path.dirname(sys.executable), "browsers")
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _browsers_path
+else:
     _apd = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+    if not _apd and sys.platform == "win32":
+        _apd = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    _browsers_path = os.path.join(_apd, "BhulekhScraper", "browsers") if _apd else ""
     if _apd:
-        _browsers_path = os.path.join(_apd, "BhulekhScraper", "browsers")
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _browsers_path)
+
+
+def _find_chromium_executable():
+    """When running as exe, find chrome.exe under _browsers_path and pass it explicitly to Playwright."""
+    if not _browsers_path or not os.path.isdir(_browsers_path):
+        return None
+    for name in os.listdir(_browsers_path):
+        if name.startswith("chromium-") and os.path.isdir(os.path.join(_browsers_path, name)):
+            for sub in ("chrome-win64", "chrome-win"):
+                exe = os.path.join(_browsers_path, name, sub, "chrome.exe")
+                if os.path.isfile(exe):
+                    return exe
+    return None
+
 
 import asyncio
 import pandas as pd
@@ -26,7 +46,7 @@ from datetime import date
 
 # Expiry: program will refuse to run after this date (useful for .exe builds).
 # Set to None to disable expiry check.
-EXPIRY_DATE = date(2026, 1, 31)  # YYYY, MM, DD
+EXPIRY_DATE = date(2026, 2, 15)  # YYYY, MM, DD
 VERSION = "1.0.0"
 
 # Configure logging (UTF-8 so Odia/Unicode log messages don't fail on Windows)
@@ -247,6 +267,10 @@ class BhulekhScraper:
         # For Brave, specify executable path
         if self.browser_type == 'brave':
             launch_options['executable_path'] = self.brave_executable_path
+        elif getattr(sys, "frozen", False) and self.browser_type == 'chromium':
+            _chromium_exe = _find_chromium_executable()
+            if _chromium_exe:
+                launch_options['executable_path'] = _chromium_exe
         
         if self.use_persistent_context:
             # Use persistent context (saves cookies, session, etc.)
@@ -268,6 +292,10 @@ class BhulekhScraper:
                 
                 if self.browser_type == 'brave':
                     persistent_options['executable_path'] = self.brave_executable_path
+                elif getattr(sys, "frozen", False) and self.browser_type == 'chromium':
+                    _chromium_exe = _find_chromium_executable()
+                    if _chromium_exe:
+                        persistent_options['executable_path'] = _chromium_exe
                 
                 try:
                     self.context = await browser_launcher.launch_persistent_context(**persistent_options)
@@ -275,8 +303,9 @@ class BhulekhScraper:
                     err_msg = str(e)
                     if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
                         raise RuntimeError(
-                            "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
-                            "Then run bhulekh_scraper.exe again."
+                            "Chromium not installed next to this exe.\n"
+                            "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
+                            f"then run this exe again. Folder used: {_browsers_path}"
                         ) from e
                     raise
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
@@ -289,8 +318,9 @@ class BhulekhScraper:
                     err_msg = str(e)
                     if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
                         raise RuntimeError(
-                            "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
-                            "Then run bhulekh_scraper.exe again."
+                            "Chromium not installed next to this exe.\n"
+                            "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
+                            f"then run this exe again. Folder used: {_browsers_path}"
                         ) from e
                     raise
                 self.context = await self.browser.new_context(**context_options)
@@ -303,8 +333,9 @@ class BhulekhScraper:
                 err_msg = str(e)
                 if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
                     raise RuntimeError(
-                        "Chromium not found. Run install_browsers.exe first to download Chromium.\n"
-                        "Then run bhulekh_scraper.exe again."
+                        "Chromium not installed next to this exe.\n"
+                        "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
+                        f"then run this exe again. Folder used: {_browsers_path}"
                     ) from e
                 raise
             self.context = await self.browser.new_context(**context_options)
