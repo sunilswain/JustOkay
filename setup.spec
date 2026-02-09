@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+# Build: pyinstaller setup.spec
 
 a = Analysis(
-    ['install_browsers.py'],
+    ['setup.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='install_browsers',
+    name='setup',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -40,5 +40,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='install_browsers',
+    name='setup',
 )
