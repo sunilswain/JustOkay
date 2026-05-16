@@ -76,8 +76,22 @@ pip install --quiet \
     lxml
 
 log "Installing Playwright browsers (Chromium only)..."
-playwright install chromium
-playwright install-deps chromium
+# Try Playwright's bundled Chromium first (works on Ubuntu 22.04 / 24.04)
+if playwright install chromium 2>/dev/null; then
+    log "Playwright Chromium installed successfully"
+else
+    # Ubuntu 26.04+ not yet supported by Playwright — use system Chromium
+    log "Playwright bundled Chromium not available for this OS, using system Chromium..."
+    snap install chromium 2>/dev/null || apt-get install -y chromium-browser 2>/dev/null || true
+    CHROMIUM_PATH=$(which chromium || which chromium-browser || echo "")
+    if [ -n "$CHROMIUM_PATH" ]; then
+        log "System Chromium found at: $CHROMIUM_PATH"
+        echo "export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$CHROMIUM_PATH" >> /etc/environment
+        echo "export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" >> /etc/environment
+    else
+        log "WARNING: No Chromium found. Install manually: sudo snap install chromium"
+    fi
+fi
 
 # ── 4. Data directory ─────────────────────────────────────────────────────────
 log "Creating data directory..."

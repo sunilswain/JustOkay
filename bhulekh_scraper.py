@@ -280,10 +280,17 @@ class BhulekhScraper:
         # For Brave, specify executable path
         if self.browser_type == 'brave':
             launch_options['executable_path'] = self.brave_executable_path
-        elif getattr(sys, "frozen", False) and self.browser_type == 'chromium':
-            _chromium_exe = _find_chromium_executable()
-            if _chromium_exe:
-                launch_options['executable_path'] = _chromium_exe
+        elif self.browser_type == 'chromium':
+            # Check env var set by aws_setup.sh for Ubuntu 26.04+ system Chromium
+            import os
+            sys_chromium = os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '')
+            if sys_chromium and os.path.exists(sys_chromium):
+                launch_options['executable_path'] = sys_chromium
+                logger.info(f"Using system Chromium: {sys_chromium}")
+            elif getattr(sys, "frozen", False):
+                _chromium_exe = _find_chromium_executable()
+                if _chromium_exe:
+                    launch_options['executable_path'] = _chromium_exe
         
         if self.use_persistent_context:
             # Use persistent context (saves cookies, session, etc.)
