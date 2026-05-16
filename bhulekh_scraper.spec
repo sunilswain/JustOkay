@@ -21,7 +21,6 @@ exe = EXE(
     a.scripts,
     a.binaries,
     a.datas,
-    [],
     name='bhulekh_scraper',
     debug=False,
     bootloader_ignore_signals=False,

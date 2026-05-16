@@ -46,3 +46,38 @@ Thumbs.db
 # Playwright
 .playwright/
 browser_data/
+
+# Scraped data (large; transfer separately)
+bhulekh_data/
+*.db
+*.ndjson
+
+# Work queue (machine-specific)
+work_queue.db
+
+# Exports / verification
+bhulekh_all.csv
+bhulekh_all.tsv
+verify_sample.csv
+*_export.csv
+
+# Logs
+*.log
+
+# Probe / debug artifacts
+probe_*.py
+probe_*.html
+probe_*.txt
+capture_post.py
+captured_posts.jsonl
+test.py
+test.ipynb
+test.json
+
+# PyInstaller
+bundle/
+*.spec
+
+# uv
+pyvenv.cfg
+uv.lock

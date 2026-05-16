@@ -44,10 +44,12 @@ from pathlib import Path
 import random
 from datetime import date
 
+from storage import create_storage, BhulekhStorageBase, DEFAULT_DATA_DIR
+
 # Expiry: program will refuse to run after this date (useful for .exe builds).
 # Set to None to disable expiry check.
-EXPIRY_DATE = date(2026, 2, 15)  # YYYY, MM, DD
-VERSION = "1.0.0"
+EXPIRY_DATE = date(2026, 2, 25)  # YYYY, MM, DD
+VERSION = "1.0.1"
 
 # Configure logging (UTF-8 so Odia/Unicode log messages don't fail on Windows)
 def _setup_logging():
@@ -87,7 +89,11 @@ class BhulekhScraper:
                  brave_executable_path: Optional[str] = None,
                  connect_to_browser: Optional[str] = None,
                  debug: bool = False,
-                 limit_khatiyans: Optional[int] = None):
+                 limit_khatiyans: Optional[int] = None,
+                 data_dir: Optional[str] = None,
+                 resume: bool = False,
+                 storage_backend: str = "sqlite",
+                 delay_scale: float = 1.0):
         """
         Initialize the scraper.
         
@@ -115,6 +121,13 @@ class BhulekhScraper:
         self.debug = debug
         self.limit_khatiyans = limit_khatiyans
         self.khatiyans_processed = 0
+        self.data_dir = data_dir  # if set, write to file per district (sqlite or ndjson)
+        self.resume = resume
+        self.storage_backend = storage_backend  # "sqlite" or "ndjson"
+        self._current_storage: Optional[BhulekhStorageBase] = None
+        self.delay_scale = delay_scale  # 1.0 = normal; 0.15 = fast (--fast). All human_delay() and fixed sleeps scaled.
+        self._current_district_value: Optional[str] = None
+        self._current_district_text: Optional[str] = None
         
     async def init_browser(self, headless: bool = False):
         """
@@ -301,11 +314,16 @@ class BhulekhScraper:
                     self.context = await browser_launcher.launch_persistent_context(**persistent_options)
                 except Exception as e:
                     err_msg = str(e)
-                    if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                    if "Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg:
+                        if getattr(sys, "frozen", False):
+                            raise RuntimeError(
+                                "Chromium not installed next to this exe.\n"
+                                "Run setup.exe from this folder (it will create a 'browsers' folder here),\n"
+                                f"then run this exe again. Folder used: {_browsers_path}"
+                            ) from e
                         raise RuntimeError(
-                            "Chromium not installed next to this exe.\n"
-                            "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
-                            f"then run this exe again. Folder used: {_browsers_path}"
+                            "Chromium not installed. Run once: uv run python setup.py\n"
+                            f"(installs Chromium to {_browsers_path})"
                         ) from e
                     raise
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
@@ -316,11 +334,16 @@ class BhulekhScraper:
                     self.browser = await browser_launcher.launch(**launch_options)
                 except Exception as e:
                     err_msg = str(e)
-                    if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                    if "Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg:
+                        if getattr(sys, "frozen", False):
+                            raise RuntimeError(
+                                "Chromium not installed next to this exe.\n"
+                                "Run setup.exe from this folder (it will create a 'browsers' folder here),\n"
+                                f"then run this exe again. Folder used: {_browsers_path}"
+                            ) from e
                         raise RuntimeError(
-                            "Chromium not installed next to this exe.\n"
-                            "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
-                            f"then run this exe again. Folder used: {_browsers_path}"
+                            "Chromium not installed. Run once: uv run python setup.py\n"
+                            f"(installs Chromium to {_browsers_path})"
                         ) from e
                     raise
                 self.context = await self.browser.new_context(**context_options)
@@ -331,11 +354,16 @@ class BhulekhScraper:
                 self.browser = await browser_launcher.launch(**launch_options)
             except Exception as e:
                 err_msg = str(e)
-                if getattr(sys, "frozen", False) and ("Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg):
+                if "Executable doesn't exist" in err_msg or "doesn't exist at" in err_msg:
+                    if getattr(sys, "frozen", False):
+                        raise RuntimeError(
+                            "Chromium not installed next to this exe.\n"
+                            "Run setup.exe from this folder (it will create a 'browsers' folder here),\n"
+                            f"then run this exe again. Folder used: {_browsers_path}"
+                        ) from e
                     raise RuntimeError(
-                        "Chromium not installed next to this exe.\n"
-                        "Run install_everything.exe from this folder (it will create a 'browsers' folder here),\n"
-                        f"then run this exe again. Folder used: {_browsers_path}"
+                        "Chromium not installed. Run once: uv run python setup.py\n"
+                        f"(installs Chromium to {_browsers_path})"
                     ) from e
                 raise
             self.context = await self.browser.new_context(**context_options)
@@ -424,7 +452,10 @@ class BhulekhScraper:
         logger.info(f"Browser initialized: {browser_name} (persistent={self.use_persistent_context})")
     
     async def human_delay(self, min_seconds: float = 1.0, max_seconds: float = 3.0):
-        """Add random human-like delay."""
+        """Add random human-like delay. Scaled by self.delay_scale when set (e.g. --fast)."""
+        if self.delay_scale != 1.0:
+            min_seconds = max(0.02, min_seconds * self.delay_scale)
+            max_seconds = max(0.02, max_seconds * self.delay_scale)
         delay = random.uniform(min_seconds, max_seconds)
         await asyncio.sleep(delay)
     
@@ -464,7 +495,12 @@ class BhulekhScraper:
 
             return False
         except Exception as e:
-            logger.warning(f"Error checking for timeout: {e}")
+            msg = str(e).lower()
+            # Page navigating / not readable = can't check; assume no timeout so caller can retry
+            if "navigating" in msg or "not readable" in msg:
+                logger.debug("Could not check timeout (page changing): %s", e)
+            else:
+                logger.warning("Error checking for timeout: %s", e)
             return False
     
     async def wait_for_page_load(self, timeout: int = 30000):
@@ -519,7 +555,7 @@ class BhulekhScraper:
             while time.time() < deadline:
                 if await _check():
                     return True
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(max(0.05, 0.25 * self.delay_scale))
             logger.warning(f"Dropdown {selector} did not populate within {timeout_ms}ms")
             return False
         except Exception as e:
@@ -605,7 +641,7 @@ class BhulekhScraper:
             
             try:
                 await self.page.mouse.move(random.randint(100, 500), random.randint(100, 500))
-                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await asyncio.sleep(max(0.02, random.uniform(0.2, 0.5) * self.delay_scale))
             except:
                 pass
             
@@ -698,23 +734,163 @@ class BhulekhScraper:
                 pass
             raise
     
+    async def _is_type2_ror(self) -> bool:
+        """
+        Detect Type-2 RoR layout: "ପରିଶିଷ୍ଟ - ଖ / Form 99" page.
+        Type 1 uses #gvfront GridView; Type 2 uses a different table structure
+        with Odia labels like ଭୂ-ସ୍ୱାମୀ (landlord) and ରୟତ (tenant).
+        """
+        # Quickest check: Type 1 mouja label present → definitely Type 1
+        if await self.page.locator('#gvfront_ctl02_lblMouja').count() > 0:
+            mouja = await self.page.locator('#gvfront_ctl02_lblMouja').inner_text()
+            if mouja.strip():
+                return False
+        # Check for Type-2 marker text on page
+        body = await self.page.locator('body').inner_text()
+        type2_markers = ['ପରିଶିଷ୍ଟ', 'ଫର୍ମ ନଂ', 'ପରିଚ୍ଛେଦ', 'ଭୂ-ସ୍ୱାମୀ']
+        return any(m in body for m in type2_markers)
+
     async def extract_ror_data(self) -> Dict:
-        """Extract data from the RoR page."""
+        """
+        Extract data from the RoR page.
+        Automatically detects Type-1 (gvfront GridView) vs Type-2 (ପରିଶିଷ୍ଟ / Form 99)
+        and uses the appropriate extractor.
+        """
         try:
+            if await self._is_type2_ror():
+                logger.info("Detected Type-2 RoR layout (ପରିଶିଷ୍ଟ / Form-99)")
+                return await self.extract_ror_data_type2()
+
             data = {}
-            
-            # Extract front page data
             front_data = await self.extract_front_page_data()
             data.update(front_data)
-            
-            # Extract back page data (plot details)
             back_data = await self.extract_back_page_data()
             data['plots'] = back_data
-            
+            data['ror_type'] = 'type1'
             return data
         except Exception as e:
             logger.error(f"Error extracting RoR data: {e}")
             return {}
+
+    async def extract_ror_data_type2(self) -> Dict:
+        """
+        Extract data from Type-2 RoR layout: "ପରିଶିଷ୍ଟ - ଖ / Form 99".
+
+        Type-2 uses a different HTML structure.  The page does not have a
+        #gvfront GridView; instead it has a table-based layout with Odia
+        label text.  We extract by:
+          1. Trying known alternative element IDs (variation on gvfront pattern).
+          2. Falling back to label-text scanning — find any <td> whose text
+             matches a known Odia label, then read the NEXT sibling <td> as
+             the value.  This is resilient to ID changes between districts.
+        """
+        data: Dict = {'ror_type': 'type2', 'plots': []}
+
+        # ── Strategy 1: try alternative GridView IDs seen on Type-2 pages ─────
+        # Some districts use gvRorFront instead of gvfront for Type-2
+        alt_map = {
+            'mouja':         ['#gvRorFront_ctl02_lblMouja',    '#ctl00_ContentPlaceHolder1_lblMouja'],
+            'tehsil':        ['#gvRorFront_ctl02_lblTehsil',   '#ctl00_ContentPlaceHolder1_lblTehsil'],
+            'thana':         ['#gvRorFront_ctl02_lblThana',    '#ctl00_ContentPlaceHolder1_lblThana'],
+            'tehsil_no':     ['#gvRorFront_ctl02_lblTesilNo',  '#ctl00_ContentPlaceHolder1_lblTesilNo'],
+            'thana_no':      ['#gvRorFront_ctl02_lblThanano',  '#ctl00_ContentPlaceHolder1_lblThanano'],
+            'district':      ['#gvRorFront_ctl02_lblDist',     '#ctl00_ContentPlaceHolder1_lblDist'],
+            'landlord_name': ['#gvRorFront_ctl02_lblLandlordName', '#ctl00_ContentPlaceHolder1_lblLandlordName',
+                              '#gvRorFront_ctl02_lblBhuswami', '#ctl00_ContentPlaceHolder1_lblBhuswami'],
+            'khatiyan_sl_no':['#gvRorFront_ctl02_lblKhatiyanslNo'],
+            'tenant_name':   ['#gvRorFront_ctl02_lblName',     '#ctl00_ContentPlaceHolder1_lblName',
+                              '#gvRorFront_ctl02_lblRaiyat',   '#ctl00_ContentPlaceHolder1_lblRaiyat'],
+            'status':        ['#gvRorFront_ctl02_lblStatua',   '#ctl00_ContentPlaceHolder1_lblStatua'],
+            'water_tax':     ['#gvRorFront_ctl02_lblWaterTax', '#ctl00_ContentPlaceHolder1_lblWaterTax'],
+            'tax':           ['#gvRorFront_ctl02_lblTax',      '#ctl00_ContentPlaceHolder1_lblTax'],
+            'ses':           ['#gvRorFront_ctl02_lblSes'],
+            'other_ses':     ['#gvRorFront_ctl02_lblOtherses'],
+            'total':         ['#gvRorFront_ctl02_lblTotal',    '#ctl00_ContentPlaceHolder1_lblTotal'],
+            'description':   ['#gvRorFront_ctl02_lblDescription'],
+            'special_case':  ['#gvRorFront_ctl02_lblSpecialCase'],
+            'last_publish_date': ['#gvRorFront_ctl02_lblLastPublishDate'],
+            'tax_date':      ['#gvRorFront_ctl02_lblTaxDate'],
+            # Type-2 specific fields
+            'form_no':       ['#ctl00_ContentPlaceHolder1_lblFormNo', '[id*="lblFormNo"]'],
+            'parichheda':    ['#ctl00_ContentPlaceHolder1_lblParichheda', '[id*="lblParichheda"]'],
+        }
+
+        for field, selectors in alt_map.items():
+            for sel in selectors:
+                try:
+                    el = self.page.locator(sel)
+                    if await el.count() > 0:
+                        val = await el.inner_text()
+                        if val.strip():
+                            data[field] = val.strip()
+                            break
+                except Exception:
+                    pass
+            if field not in data:
+                data[field] = ''
+
+        # ── Strategy 2: label-text scan (fallback, catches any layout variant) ─
+        # Map of Odia label text → field name
+        odia_labels = {
+            'ମୌଜା':         'mouja',
+            'ତହସିଲ':        'tehsil',
+            'ଥାନା':         'thana',
+            'ଜିଲ୍ଲା':      'district',
+            'ଭୂ-ସ୍ୱାମୀ':   'landlord_name',
+            'ଖେୱାଟ':        'landlord_name',
+            'ରୟତ':          'tenant_name',
+            'ଅଧିବାସୀ':     'tenant_name',
+            'ଫର୍ମ ନଂ':      'form_no',
+            'ପରିଚ୍ଛେଦ':    'parichheda',
+        }
+        # Only run label scan if Strategy 1 left critical fields empty
+        if not data.get('mouja') or not data.get('landlord_name'):
+            try:
+                all_cells = await self.page.locator('td').all()
+                for i, cell in enumerate(all_cells[:-1]):
+                    cell_text = (await cell.inner_text()).strip()
+                    for label, field in odia_labels.items():
+                        if label in cell_text and not data.get(field):
+                            try:
+                                next_cells = await self.page.locator('td').nth(i + 1).inner_text()
+                                val = next_cells.strip().lstrip(':：').strip()
+                                if val and val not in odia_labels:
+                                    data[field] = val
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.warning(f"Type-2 label scan failed: {e}")
+
+        # ── Plot rows: Type-2 back table (gvRorBack or variant) ───────────────
+        back_plots = await self.extract_back_page_data()
+        if back_plots:
+            data['plots'] = back_plots
+        else:
+            # Try alternative back table selectors
+            for back_sel in ['#gvRorBack2', '#gvRorFrontBack', '#gvplotdetail',
+                             '[id*="gvRor"] tr', '[id*="gvPlot"] tr']:
+                try:
+                    rows = await self.page.locator(back_sel).all()
+                    if rows:
+                        logger.info(f"Type-2 back table found via {back_sel}: {len(rows)} rows")
+                        break
+                except Exception:
+                    pass
+
+        # Log what we captured
+        filled = sum(1 for v in data.values() if v and v != [] and v != 'type2')
+        logger.info(f"Type-2 extraction: {filled} fields populated, {len(data['plots'])} plots")
+
+        if filled <= 2:
+            # Complete extraction failure — capture raw page text as fallback
+            try:
+                raw_text = await self.page.locator('body').inner_text()
+                data['raw_page_text'] = raw_text[:3000]
+                logger.warning("Type-2 extraction got nothing; raw page text captured for debugging")
+            except Exception:
+                pass
+
+        return data
     
     async def extract_front_page_data(self) -> Dict:
         """Extract data from the front page of RoR."""
@@ -877,8 +1053,18 @@ class BhulekhScraper:
             except:
                 raise
     
-    async def process_khatiyan(self, khatiyan_value: str, khatiyan_text: str, 
-                               district: str, tahasil: str, village: str) -> bool:
+    async def _reselect_district_tahasil_village(self, tahasil_value: str, village_value: str) -> None:
+        """Re-select district, tahasil, village and Khatiyan search type (e.g. after navigate_to_ror_page on retry)."""
+        district_value = self._current_district_value or ""
+        await self.select_dropdown(SELECTOR_DISTRICT, district_value, wait_for_update=True)
+        await self.select_dropdown(SELECTOR_TAHASIL, tahasil_value, wait_for_update=True)
+        await self.select_dropdown(SELECTOR_VILLAGE, village_value, wait_for_update=True)
+        await self.select_search_type("Khatiyan")
+        await self.human_delay(0.5, 1.0)
+
+    async def process_khatiyan(self, khatiyan_value: str, khatiyan_text: str,
+                               district: str, tahasil: str, village: str,
+                               tahasil_value: str = "", village_value: str = "") -> bool:
         """Process a single Khatiyan: select it, view RoR, extract data, and go back."""
         max_retries = 2
         for attempt in range(max_retries):
@@ -896,17 +1082,18 @@ class BhulekhScraper:
                 if await self.check_for_timeout_error():
                     if attempt < max_retries - 1:
                         logger.warning(f"Timeout error detected, retrying (attempt {attempt + 1}/{max_retries})...")
-                        await self.navigate_to_ror_page()
-                        # Re-select district, tahasil, village
-                        await self.select_dropdown(SELECTOR_DISTRICT, district, wait_for_update=True)
-                        await self.select_dropdown(SELECTOR_TAHASIL, tahasil, wait_for_update=True)
-                        await self.select_dropdown(SELECTOR_VILLAGE, village, wait_for_update=True)
-                        await self.select_search_type("Khatiyan")
-                        await self.human_delay(0.5, 1.0)
+                        await self._reselect_district_tahasil_village(tahasil_value, village_value)
                         continue
                     else:
                         raise Exception("Timeout error persists after retries")
-                
+
+                # Wait for RoR view content so we don't extract while page is still loading/navigating
+                try:
+                    await self.page.wait_for_selector("#gvfront_ctl02_lblMouja, #gvfront, #gvRorBack", state="visible", timeout=15000)
+                except Exception:
+                    pass  # continue and try extract anyway
+                await self.human_delay(0.1, 0.25)
+
                 # Extract data
                 ror_data = await self.extract_ror_data()
                 
@@ -921,6 +1108,20 @@ class BhulekhScraper:
                 self.data_list.append(ror_data)
                 self.khatiyans_processed += 1
                 total = len(self.data_list)
+                # Persistent storage: append immediately so no data loss on crash
+                if self._current_storage:
+                    self._current_storage.append_khatiyan(ror_data)
+                    self._current_storage.set_checkpoint(
+                        self._current_district_value or "",
+                        self._current_district_text or "",
+                        tahasil_value or tahasil,
+                        tahasil,
+                        village_value or village,
+                        village,
+                        khatiyan_value,
+                        khatiyan_text,
+                        self._current_storage.get_khatiyan_count(),
+                    )
                 logger.info(f"Processed Khatiyan: {khatiyan_text} (Value: {khatiyan_value}) | Records: {total}")
                 # In dry-run/limit mode, save after each record so you see active file changes
                 if self.limit_khatiyans is not None:
@@ -939,15 +1140,18 @@ class BhulekhScraper:
                     await self.human_delay(0.8, 1.5)
                     try:
                         await self.navigate_to_ror_page()
-                    except:
-                        pass
+                        await self._reselect_district_tahasil_village(tahasil_value, village_value)
+                    except Exception as nav_e:
+                        logger.warning("Reselect after error failed: %s", nav_e)
                 else:
                     logger.error(f"Error processing Khatiyan {khatiyan_value} after {max_retries} attempts: {e}")
                     return False
         return False
     
     async def process_village(self, village_value: str, village_text: str,
-                             district: str, tahasil: str) -> bool:
+                             district: str, tahasil: str,
+                             tahasil_value: str = "",
+                             start_after_khatiyan_value: Optional[str] = None) -> bool:
         """Process all Khatiyans in a village."""
         try:
             # Select village (triggers postback; Khatiyan dropdown will populate)
@@ -967,24 +1171,35 @@ class BhulekhScraper:
                 logger.warning(f"No Khatiyans found for village: {village_text}")
                 return True  # Continue to next village
             
-            logger.info(f"Processing {len(khatiyan_options)} Khatiyans for village: {village_text}")
-            
+            # Resume: skip khatiyans until we're past the checkpoint
+            start_index = 0
+            if start_after_khatiyan_value:
+                for i, k in enumerate(khatiyan_options):
+                    if (k.get("value") or "").strip() == (start_after_khatiyan_value or "").strip():
+                        start_index = i + 1
+                        logger.info(f"Resuming after Khatiyan value {start_after_khatiyan_value!r}; skipping {start_index} khatiyans")
+                        break
+
+            logger.info(f"Processing {len(khatiyan_options) - start_index} Khatiyans for village: {village_text}")
+
             # Process each Khatiyan
-            for khatiyan in khatiyan_options:
+            for khatiyan in khatiyan_options[start_index:]:
                 if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                     break
                 # Re-select village if needed (after coming back from RoR page)
                 current_village = await self.page.evaluate("document.querySelector('#ctl00_ContentPlaceHolder1_ddlVillage')?.value || document.querySelector('select[id*=\"ddlVillage\"]')?.value || ''")
                 if current_village != village_value:
                     await self.select_dropdown(SELECTOR_VILLAGE, village_value)
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(max(0.05, 0.8 * self.delay_scale))
                 
                 success = await self.process_khatiyan(
                     khatiyan['value'],
                     khatiyan['text'],
                     district,
                     tahasil,
-                    village_text
+                    village_text,
+                    tahasil_value=tahasil_value,
+                    village_value=village_value,
                 )
                 
                 if not success:
@@ -1000,7 +1215,8 @@ class BhulekhScraper:
             return False
     
     async def process_tahasil(self, tahasil_value: str, tahasil_text: str,
-                             district: str, start_village: Optional[str] = None) -> bool:
+                             district: str, start_village: Optional[str] = None,
+                             start_after_khatiyan_value: Optional[str] = None) -> bool:
         """Process all villages in a Tahasil."""
         try:
             # Select Tahasil (triggers postback; Village dropdown will populate)
@@ -1020,29 +1236,33 @@ class BhulekhScraper:
                 logger.warning(f"No villages found for Tahasil: {tahasil_text}")
                 return True  # Continue to next Tahasil
             
-            # Determine starting point
+            # Determine starting point (for resume)
             start_index = 0
             if start_village:
                 for i, village in enumerate(village_options):
                     if village['value'] == start_village or village['text'] == start_village:
                         start_index = i
                         break
-            
+
             logger.info(f"Processing {len(village_options) - start_index} villages for Tahasil: {tahasil_text}")
-            
+
             # Process each village
-            for village in village_options[start_index:]:
+            for idx, village in enumerate(village_options[start_index:]):
                 # Re-select Tahasil if needed (after coming back from RoR page)
                 current_tahasil = await self.page.evaluate("document.querySelector('#ctl00_ContentPlaceHolder1_ddlTahsil')?.value || document.querySelector('select[id*=\"ddlTahsil\"]')?.value || ''")
                 if current_tahasil != tahasil_value:
                     await self.select_dropdown(SELECTOR_TAHASIL, tahasil_value)
-                    await asyncio.sleep(0.8)
-                
+                    await asyncio.sleep(max(0.05, 0.8 * self.delay_scale))
+
+                # Only pass start_after_khatiyan for the first village when resuming
+                khatiyan_resume = start_after_khatiyan_value if (start_index == 0 and idx == 0) else None
                 success = await self.process_village(
                     village['value'],
                     village['text'],
                     district,
-                    tahasil_text
+                    tahasil_text,
+                    tahasil_value=tahasil_value,
+                    start_after_khatiyan_value=khatiyan_resume,
                 )
                 
                 if not success:
@@ -1059,13 +1279,29 @@ class BhulekhScraper:
     
     async def process_district(self, district_value: str, district_text: str,
                               start_tahasil: Optional[str] = None,
-                              start_village: Optional[str] = None) -> bool:
+                              start_village: Optional[str] = None,
+                              start_after_khatiyan_value: Optional[str] = None) -> bool:
         """Process all Tahasils in a District."""
+        storage: Optional[BhulekhStorageBase] = None
         try:
+            # Persistent storage for this district (file: .db or .ndjson)
+            if self.data_dir:
+                storage = create_storage(self.data_dir, district_text, backend=self.storage_backend)
+                self._current_storage = storage
+                self._current_district_value = district_value
+                self._current_district_text = district_text
+                if self.resume:
+                    cp = storage.get_checkpoint()
+                    if cp and cp.get("district_value") == district_value:
+                        start_tahasil = start_tahasil or cp.get("tahasil_value")
+                        start_village = start_village or cp.get("village_value")
+                        start_after_khatiyan_value = cp.get("last_khatiyan_value")
+                        logger.info(f"Resuming district {district_text}: from tahasil={start_tahasil}, village={start_village}, after khatiyan={start_after_khatiyan_value!r}")
+
             # Navigate to the page if not already there
             if self.page.url != self.start_url:
                 await self.navigate_to_ror_page()
-            
+
             # Select district
             await self.select_dropdown(SELECTOR_DISTRICT, district_value)
             
@@ -1102,11 +1338,14 @@ class BhulekhScraper:
                 if start_tahasil and tahasil['value'] == start_tahasil and start_village:
                     start_village_value = start_village
                 
+                # Pass resume khatiyan only for the first tahasil when resuming
+                khatiyan_resume = start_after_khatiyan_value if (start_tahasil and tahasil['value'] == start_tahasil) else None
                 success = await self.process_tahasil(
                     tahasil['value'],
                     tahasil['text'],
                     district_text,
-                    start_village_value
+                    start_village_value,
+                    start_after_khatiyan_value=khatiyan_resume,
                 )
                 
                 if not success:
@@ -1119,10 +1358,16 @@ class BhulekhScraper:
                 await self.human_delay(0.8, 1.2)
             
             return True
-            
+
         except Exception as e:
             logger.error(f"Error processing District {district_value}: {e}")
             return False
+        finally:
+            if storage:
+                storage.close()
+                self._current_storage = None
+                self._current_district_value = None
+                self._current_district_text = None
     
     async def cleanup(self):
         """Clean up browser resources."""
@@ -1219,6 +1464,13 @@ class BhulekhScraper:
                     return
                 
                 await self.process_district(district_value, district_text, tahasil, village)
+            elif getattr(self, '_districts_to_run', None):
+                # Multi-worker: process only these (value, text) districts
+                for district_value, district_text in self._districts_to_run:
+                    await self.process_district(district_value, district_text)
+                    if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
+                        break
+                    await self.human_delay(1.0, 2.0)
             else:
                 # Process all districts
                 district_options = await self.get_dropdown_options(SELECTOR_DISTRICT)
@@ -1232,8 +1484,9 @@ class BhulekhScraper:
                         break
                     await self.human_delay(1.0, 2.0)
             
-            # Save data to file (full save if not already saving per-record)
-            await self.save_data()
+            # Save in-memory data only when not using persistent storage (SQLite per district)
+            if not self.data_dir:
+                await self.save_data()
             
         except Exception as e:
             logger.error(f"Error in main run: {e}")
@@ -1270,6 +1523,158 @@ class BhulekhScraper:
                 
         except Exception as e:
             logger.error(f"Error saving data: {e}")
+
+
+    async def run_from_queue(
+        self,
+        queue_path: str,
+        headless: bool = True,
+        worker_id: Optional[str] = None,
+        district_codes: Optional[List[int]] = None,
+    ) -> None:
+        """
+        Village-queue runner.
+
+        Continuously claims the next pending village from work_queue.db,
+        scrapes all its khatiyans, then marks it done.  Safe to run in
+        multiple processes simultaneously — SQLite atomic UPDATE prevents
+        two workers from claiming the same village.
+
+        Resume: if a worker was interrupted mid-village the village is
+        reclaimed automatically (CLAIM_TIMEOUT_SECONDS has elapsed) and
+        the scraper picks up from last_khatiyan_no stored in the queue.
+        """
+        import socket, os
+        from work_queue import make_queue, claim_village, complete_village, fail_village, checkpoint_village, heartbeat
+
+        if worker_id is None:
+            worker_id = f"{socket.gethostname()}-{os.getpid()}"
+
+        # Support both local SQLite path and remote queue server URL
+        _queue = make_queue(queue_path, api_key=getattr(self, '_queue_api_key', None))
+        _is_remote = hasattr(_queue, 'claim_village')
+
+        def _claim():
+            return (_queue.claim_village(worker_id=worker_id, district_codes=district_codes)
+                    if _is_remote
+                    else claim_village(queue_path, worker_id=worker_id, district_codes=district_codes))
+
+        def _complete(vid, n):
+            return _queue.complete_village(vid, n) if _is_remote else complete_village(queue_path, vid, n)
+
+        def _fail(vid, err):
+            return _queue.fail_village(vid, err) if _is_remote else fail_village(queue_path, vid, err)
+
+        def _heartbeat(vid):
+            return _queue.heartbeat(vid) if _is_remote else heartbeat(queue_path, vid)
+
+        await self.init_browser(headless=headless)
+        await self.navigate_to_ror_page()
+
+        logger.info("Worker %s: ready, drawing villages from queue %s", worker_id, queue_path)
+
+        while True:
+            village_info = _claim()
+            if village_info is None:
+                logger.info("Worker %s: no more pending villages — done.", worker_id)
+                break
+
+            v_id      = village_info["id"]
+            d_code    = str(village_info["district_code"])
+            d_name    = village_info["district_name"]
+            tah_code  = str(village_info["tahasil_code"])
+            tah_name  = village_info["tahasil_name"]
+            vil_code  = str(village_info["village_code"])
+            vil_name  = village_info["village_name"]
+            resume_kh = village_info.get("last_khatiyan_no")  # None or a khatiyan value
+
+            logger.info(
+                "Worker %s: claiming village %s (%s) | tahasil %s | district %s",
+                worker_id, vil_name, vil_code, tah_name, d_name,
+            )
+
+            try:
+                # Set up persistent storage for this district
+                if self.data_dir:
+                    from storage import create_storage
+                    storage = create_storage(
+                        self.data_dir, d_name, backend=self.storage_backend
+                    )
+                    self._current_storage = storage
+                    self._current_district_value = d_code
+                    self._current_district_text = d_name
+
+                # Navigate to page if needed
+                if self.page.url != self.start_url:
+                    await self.navigate_to_ror_page()
+
+                # Select district → tahasil → village in browser
+                await self.select_dropdown(SELECTOR_DISTRICT, d_code)
+                await self.select_search_type("Khatiyan")
+                if not await self.wait_for_dropdown_populated(SELECTOR_TAHASIL, min_options=1, timeout_ms=25000):
+                    raise Exception(f"Tahasil dropdown did not populate for district {d_code}")
+                await self.human_delay(0.2, 0.4)
+
+                await self.select_dropdown(SELECTOR_TAHASIL, tah_code)
+                if not await self.wait_for_dropdown_populated(SELECTOR_VILLAGE, min_options=1, timeout_ms=25000):
+                    raise Exception(f"Village dropdown did not populate for tahasil {tah_code}")
+                await self.human_delay(0.2, 0.4)
+
+                # Count khatiyans already done for this village (from previous attempt)
+                already_done = village_info.get("khatiyans_fetched", 0) or 0
+
+                # Heartbeat task so the village isn't reclaimed while we work
+                async def _heartbeat_loop():
+                    while True:
+                        await asyncio.sleep(120)
+                        _heartbeat(v_id)
+
+                hb_task = asyncio.create_task(_heartbeat_loop())
+
+                try:
+                    await self.process_village(
+                        village_value=vil_code,
+                        village_text=vil_name,
+                        district=d_name,
+                        tahasil=tah_name,
+                        tahasil_value=tah_code,
+                        start_after_khatiyan_value=resume_kh,
+                    )
+                finally:
+                    hb_task.cancel()
+
+                kh_done = already_done + self.khatiyans_processed
+                _complete(v_id, kh_done)
+                logger.info(
+                    "Worker %s: completed village %s (%d khatiyans)", worker_id, vil_name, kh_done
+                )
+                # Reset per-village counter
+                self.khatiyans_processed = 0
+
+            except Exception as e:
+                logger.error("Worker %s: error on village %s: %s", worker_id, vil_name, e)
+                _fail(v_id, str(e))
+                # Re-navigate for next village
+                try:
+                    await self.navigate_to_ror_page()
+                except Exception:
+                    pass
+
+        await self.cleanup()
+
+
+async def get_district_list(base_url: str = "http://bhulekh.ori.nic.in", headless: bool = True) -> List[Dict[str, str]]:
+    """
+    Fetch list of districts from the site (value, text). Used by multi-worker runner to partition work.
+    """
+    scraper = BhulekhScraper(base_url=base_url)
+    try:
+        await scraper.init_browser(headless=headless)
+        await scraper.navigate_to_ror_page()
+        options = await scraper.get_dropdown_options(SELECTOR_DISTRICT)
+        return options
+    finally:
+        await scraper.cleanup()
 
 
 async def main():
@@ -1319,6 +1724,14 @@ Full command reference: see MAN.md or README.md
                         help='Process only 3 Khatiyans then stop; file updates after each record')
     parser.add_argument('--limit-khatiyans', type=int, metavar='N',
                         help='Stop after N Khatiyans (file updates after each record)')
+    parser.add_argument('--data-dir', type=str, default=None, metavar='DIR',
+                        help=f'Persistent storage directory (SQLite per district). Default: {DEFAULT_DATA_DIR!r} when --resume or this is set')
+    parser.add_argument('--resume', action='store_true',
+                        help='Resume from last checkpoint in --data-dir (per district)')
+    parser.add_argument('--storage', type=str, choices=['sqlite', 'ndjson'], default='sqlite',
+                        help='Storage backend: sqlite (default) or ndjson (plain JSON Lines file, often faster append)')
+    parser.add_argument('--fast', action='store_true',
+                        help='Use minimal delays (delay_scale=0.15). Faster but may trigger timeouts or blocks on the site.')
 
     args = parser.parse_args()
 
@@ -1333,7 +1746,12 @@ Full command reference: see MAN.md or README.md
     limit = args.limit_khatiyans
     if args.dry_run and limit is None:
         limit = 3
-    
+
+    data_dir = args.data_dir
+    if (args.resume or data_dir) and data_dir is None:
+        data_dir = DEFAULT_DATA_DIR
+
+    delay_scale = 0.15 if args.fast else 1.0
     scraper = BhulekhScraper(
         base_url=args.url,
         browser_type=args.browser,
@@ -1342,7 +1760,11 @@ Full command reference: see MAN.md or README.md
         brave_executable_path=args.brave_path,
         connect_to_browser=args.connect_browser,
         debug=args.debug,
-        limit_khatiyans=limit
+        limit_khatiyans=limit,
+        data_dir=data_dir,
+        resume=args.resume,
+        storage_backend=args.storage,
+        delay_scale=delay_scale,
     )
     try:
         await scraper.run(
