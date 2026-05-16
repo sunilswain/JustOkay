@@ -73,7 +73,8 @@ pip install --quiet \
     fastapi \
     uvicorn \
     "beautifulsoup4>=4.12" \
-    lxml
+    lxml \
+    pandas
 
 log "Installing Playwright browsers (Chromium only)..."
 # Try Playwright's bundled Chromium first (works on Ubuntu 22.04 / 24.04)
