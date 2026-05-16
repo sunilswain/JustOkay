@@ -55,11 +55,10 @@ log "Setting up project directory at $PROJECT_DIR..."
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-# Copy files from home dir (uploaded via scp)
-cp ~/work_queue.db .
-# If you have more files to copy:
-# cp ~/bhulekh_scraper.py ~/storage.py ~/work_queue.py ~/run_village_workers.py \
-#    ~/soap_enumerator.py ~/export_csv.py ~/verify_db.py ~/queue_server.py .
+# Files are uploaded by scp directly into PROJECT_DIR — nothing to copy
+# (scp target should be ubuntu@IP:~/bhulekh/)
+log "Project files in $PROJECT_DIR:"
+ls -lh "$PROJECT_DIR/"
 
 # ── 3. Python virtualenv ──────────────────────────────────────────────────────
 log "Creating Python virtualenv..."
