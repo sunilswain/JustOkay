@@ -52,8 +52,7 @@ bhulekh_data/
 *.db
 *.ndjson
 
-# Work queue (machine-specific)
-work_queue.db
+# work_queue.db is tracked (small, needed on all machines)
 
 # Exports / verification
 bhulekh_all.csv
