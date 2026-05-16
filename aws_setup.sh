@@ -2,22 +2,22 @@
 # =============================================================================
 # Bhulekh Scraper — One-time EC2 setup script
 #
-# Run ONCE after cloning the repo:
+# Run ONCE after first clone:
 #   git clone https://github.com/sunilswain/JustOkay.git justokay
 #   cd justokay && sudo bash aws_setup.sh
 #
-# After this, everything is automatic on every boot.
-# To update: push changes to GitHub → reboot OR sudo systemctl restart bhulekh-boot
+# After this, every reboot auto-runs boot.sh (git pull + uv sync + start).
+# To apply changes without reboot:
+#   sudo systemctl restart bhulekh-boot && sudo systemctl restart bhulekh
 # =============================================================================
 
 set -euo pipefail
 
 PROJECT_DIR="/home/ubuntu/justokay"
-DATA_DIR="$PROJECT_DIR/bhulekh_data"
 
 log() { echo -e "\n\033[1;32m>>> $*\033[0m"; }
 
-# ── 1. System packages (apt) ──────────────────────────────────────────────────
+# ── 1. System packages ────────────────────────────────────────────────────────
 log "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
@@ -28,28 +28,21 @@ apt-get install -y -qq \
     libatspi2.0-0 libx11-6 libxext6 libxcb1 \
     fonts-noto fonts-noto-cjk
 
-# libasound2 renamed in Ubuntu 24+
 apt-get install -y -qq libasound2 2>/dev/null || \
 apt-get install -y -qq libasound2t64 2>/dev/null || true
 
 # ── 2. uv ─────────────────────────────────────────────────────────────────────
 log "Installing uv..."
 sudo -u ubuntu bash -c 'curl -Lsf https://astral.sh/uv/install.sh | sh'
-export PATH="/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:$PATH"
+UV="/home/ubuntu/.local/bin/uv"
 
-# ── 3. Python venv + all dependencies ────────────────────────────────────────
-log "Installing Python dependencies via uv..."
-cd "$PROJECT_DIR"
-sudo -u ubuntu bash -c "
-    export PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:\$PATH
-    cd $PROJECT_DIR
-    uv venv .venv
-    uv pip install -q -r requirements.txt
-"
+# ── 3. Python deps via uv sync ────────────────────────────────────────────────
+log "Syncing dependencies (uv sync)..."
+sudo -u ubuntu bash -c "cd $PROJECT_DIR && $UV sync"
 
 # ── 4. Playwright Chromium ────────────────────────────────────────────────────
 log "Installing Playwright Chromium..."
-if sudo -u ubuntu "$PROJECT_DIR/.venv/bin/playwright" install chromium; then
+if sudo -u ubuntu bash -c "cd $PROJECT_DIR && $UV run playwright install chromium"; then
     log "Playwright Chromium installed"
 else
     log "Falling back to system Chromium..."
@@ -58,24 +51,24 @@ else
     if [ -n "$CHROMIUM_PATH" ]; then
         echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=$CHROMIUM_PATH" >> /etc/environment
         echo "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1"                 >> /etc/environment
-        log "System Chromium set: $CHROMIUM_PATH"
+        log "System Chromium: $CHROMIUM_PATH"
     else
-        log "WARNING: No Chromium found — install manually: sudo snap install chromium"
+        log "WARNING: No Chromium found — sudo snap install chromium"
     fi
 fi
 
 # ── 5. Data directory ─────────────────────────────────────────────────────────
 log "Creating data directory..."
-mkdir -p "$DATA_DIR"
+mkdir -p "$PROJECT_DIR/bhulekh_data"
 chown -R ubuntu:ubuntu "$PROJECT_DIR"
 
-# ── 6. boot.sh service — runs on every boot ───────────────────────────────────
+# ── 6. Boot service (runs on every boot) ──────────────────────────────────────
 log "Installing boot service..."
 chmod +x "$PROJECT_DIR/boot.sh"
 
 cat > /etc/systemd/system/bhulekh-boot.service <<EOF
 [Unit]
-Description=Bhulekh Boot (git pull + dep sync)
+Description=Bhulekh Boot (git pull + uv sync)
 After=network-online.target
 Wants=network-online.target
 Before=bhulekh.service
@@ -115,14 +108,10 @@ $PROJECT_DIR/*.log {
 EOF
 
 # ── Done ──────────────────────────────────────────────────────────────────────
-log "Setup complete! Run:"
+log "Setup complete!"
 echo ""
-echo "  sudo systemctl start bhulekh-boot bhulekh"
-echo "  sudo journalctl -u bhulekh -f"
+echo "  Start    : sudo systemctl start bhulekh-boot bhulekh"
+echo "  Logs     : sudo journalctl -u bhulekh -f"
+echo "  Queue    : cd $PROJECT_DIR && uv run python work_queue.py stats"
+echo "  Export   : cd $PROJECT_DIR && uv run python export_csv.py --data-dir bhulekh_data --out /tmp/out.csv"
 echo ""
-echo "On every future reboot:"
-echo "  1. bhulekh-boot runs → git pull + uv sync + service file update"
-echo "  2. bhulekh starts    → scraper resumes from queue"
-echo ""
-echo "To apply changes without rebooting:"
-echo "  sudo systemctl restart bhulekh-boot && sudo systemctl restart bhulekh"

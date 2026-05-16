@@ -1,14 +1,16 @@
 [Unit]
 Description=Bhulekh Village Scraper
-After=network.target
+After=bhulekh-boot.service network-online.target
+Requires=bhulekh-boot.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
 Type=simple
 User=ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/home/ubuntu/justokay
-ExecStart=/home/ubuntu/justokay/.venv/bin/python run_village_workers.py \
+ExecStart=uv run python run_village_workers.py \
     --workers 40 \
     --db /home/ubuntu/justokay/work_queue.db \
     --data-dir /home/ubuntu/justokay/bhulekh_data \
