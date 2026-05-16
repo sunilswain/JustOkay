@@ -117,8 +117,7 @@ ExecStart=$PROJECT_DIR/venv/bin/python run_village_workers.py \\
     --db $PROJECT_DIR/work_queue.db \\
     --data-dir $DATA_DIR \\
     --headless \\
-    --fast \\
-    --districts $DISTRICTS
+    --fast
 Restart=on-failure
 RestartSec=15
 StandardOutput=journal
