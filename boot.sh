@@ -16,9 +16,15 @@ log() { echo "[boot] $*"; }
 
 cd "$PROJECT_DIR"
 
-# ── 1. Pull latest code ───────────────────────────────────────────────────────
+# ── 1. Pull latest code (preserve work_queue.db — it has live scraping progress)
 log "git pull..."
-git pull --ff-only 2>/dev/null || log "git pull skipped (offline or already up to date)"
+git fetch origin 2>/dev/null || { log "git fetch skipped (offline)"; }
+# Reset all files except work_queue.db
+git checkout origin/master -- \
+    aws_setup.sh boot.sh bhulekh.service \
+    bhulekh_scraper.py storage.py work_queue.py \
+    run_village_workers.py export_csv.py verify_db.py \
+    requirements.txt pyproject.toml uv.lock 2>/dev/null || true
 
 # ── 2. uv sync — picks up any new packages added via uv add ──────────────────
 log "uv sync..."
