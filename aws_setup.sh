@@ -19,8 +19,8 @@ set -euo pipefail
 # ── Config — edit before running ─────────────────────────────────────────────
 WORKERS=40                        # workers per machine (see sizing guide below)
 DISTRICTS="1 2 3 4 5 6 7 8 9 10" # which districts this machine handles
-DATA_DIR="/home/ubuntu/JustOkay/bhulekh_data"
-PROJECT_DIR="/home/ubuntu/JustOkay"
+DATA_DIR="/home/ubuntu/justokay/bhulekh_data"
+PROJECT_DIR="/home/ubuntu/justokay"
 # ─────────────────────────────────────────────────────────────────────────────
 
 log() { echo -e "\n\033[1;32m>>> $*\033[0m"; }
