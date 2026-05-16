@@ -390,10 +390,11 @@ def list_districts(db_path: str) -> list:
         return con.execute("""
             SELECT district_code, district_name,
                    COUNT(*) AS villages,
-                   SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done
+                   SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
+                   MAX(priority) AS priority
             FROM   villages
             GROUP BY district_code
-            ORDER BY district_code
+            ORDER BY priority DESC, district_code
         """).fetchall()
 
 
@@ -443,10 +444,11 @@ if __name__ == "__main__":
 
     elif args.cmd == "districts":
         rows = list_districts(args.db)
-        print(f"{'Code':>6}  {'Name':<30}  {'Villages':>8}  {'Done':>8}")
-        for code, name, vils, done in rows:
+        print(f"{'Code':>6}  {'Priority':>8}  {'Name':<30}  {'Villages':>8}  {'Done':>8}")
+        for code, name, vils, done, priority in rows:
             pct = f"{100*done//vils}%" if vils else "-"
-            print(f"{code:>6}  {name:<30}  {vils:>8,}  {done:>6,} {pct:>4}")
+            pri = f"★{priority}" if priority > 0 else "-"
+            print(f"{code:>6}  {pri:>8}  {name:<30}  {vils:>8,}  {done:>6,} {pct:>4}")
 
     elif args.cmd == "priority":
         n = set_priority(args.db, args.districts, args.level)
