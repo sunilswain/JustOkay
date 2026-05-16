@@ -17,25 +17,38 @@
 set -euo pipefail
 
 # ── Config — edit before running ─────────────────────────────────────────────
-WORKERS=20                        # workers per machine (see sizing guide below)
+WORKERS=40                        # workers per machine (see sizing guide below)
 DISTRICTS="1 2 3 4 5 6 7 8 9 10" # which districts this machine handles
 DATA_DIR="/home/ubuntu/bhulekh_data"
 PROJECT_DIR="/home/ubuntu/bhulekh"
-PYTHON="python3.12"
 # ─────────────────────────────────────────────────────────────────────────────
 
 log() { echo -e "\n\033[1;32m>>> $*\033[0m"; }
+
+# Detect Python — Ubuntu 26.04 ships 3.13, 22.04 ships 3.10/3.11
+detect_python() {
+    for v in python3.13 python3.12 python3.11 python3; do
+        if command -v "$v" &>/dev/null; then echo "$v"; return; fi
+    done
+    echo "python3"
+}
+PYTHON=$(detect_python)
+log "Using Python: $PYTHON ($(${PYTHON} --version))"
 
 # ── 1. System packages ────────────────────────────────────────────────────────
 log "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq \
-    python3.12 python3.12-venv python3-pip git curl wget unzip \
+    python3 python3-venv python3-pip git curl wget unzip \
     libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
-    libasound2 libatspi2.0-0 libx11-6 libxext6 libxcb1 \
+    libatspi2.0-0 libx11-6 libxext6 libxcb1 \
     fonts-noto fonts-noto-cjk                # Odia Unicode font support
+
+# libasound2 was renamed in Ubuntu 24+ — install whichever exists
+apt-get install -y -qq libasound2 2>/dev/null || \
+apt-get install -y -qq libasound2t64 2>/dev/null || true
 
 # ── 2. Project files ──────────────────────────────────────────────────────────
 log "Setting up project directory at $PROJECT_DIR..."
