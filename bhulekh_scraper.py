@@ -78,6 +78,24 @@ SELECTOR_KHATIYAN = 'select#ctl00_ContentPlaceHolder1_ddlBindData, select[id*="d
 # Khatiyan radio can be disabled until District/Tahasil are selected
 SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, input[value="Khatiyan"][name*="rbtnRORSearchtype"]'
 
+# ── Resilience tunables ────────────────────────────────────────────────────────
+# Per-village hard timeout (seconds).  If a village takes longer than this the
+# worker aborts it (marks failed → will be re-claimed later) and moves on.
+_VILLAGE_TIMEOUT = 900          # 15 minutes
+
+# Backoff between retries inside process_khatiyan (seconds).
+# 4 attempts total; wait grows: 5 → 20 → 60 → 180 s
+_KHATIYAN_RETRY_BACKOFF = [5, 20, 60, 180]
+
+# How many consecutive village-level failures before we declare "site is down"
+# and start the long backoff + browser restart cycle.
+_SITE_DOWN_THRESHOLD = 3
+
+# Backoff schedule (seconds) when site-down is detected.
+# Each consecutive failure after the threshold adds one step.
+# [60, 120, 300, 600, 1200, 1800] → up to 30 min between retries.
+_SITE_BACKOFF = [60, 120, 300, 600, 1200, 1800]
+
 
 class BhulekhScraper:
     """Main scraper class for Bhulekh website automation."""
@@ -1073,7 +1091,7 @@ class BhulekhScraper:
                                district: str, tahasil: str, village: str,
                                tahasil_value: str = "", village_value: str = "") -> bool:
         """Process a single Khatiyan: select it, view RoR, extract data, and go back."""
-        max_retries = 2
+        max_retries = len(_KHATIYAN_RETRY_BACKOFF) + 1   # 5 total attempts
         for attempt in range(max_retries):
             try:
                 # Select the Khatiyan
@@ -1088,11 +1106,17 @@ class BhulekhScraper:
                 # Check for timeout error before extracting
                 if await self.check_for_timeout_error():
                     if attempt < max_retries - 1:
-                        logger.warning(f"Timeout error detected, retrying (attempt {attempt + 1}/{max_retries})...")
+                        wait = _KHATIYAN_RETRY_BACKOFF[min(attempt, len(_KHATIYAN_RETRY_BACKOFF) - 1)]
+                        logger.warning(
+                            "Website timeout screen on Khatiyan %s (attempt %d/%d), retrying in %ds…",
+                            khatiyan_value, attempt + 1, max_retries, wait,
+                        )
+                        await asyncio.sleep(wait)
+                        await self.navigate_to_ror_page()
                         await self._reselect_district_tahasil_village(tahasil_value, village_value)
                         continue
                     else:
-                        raise Exception("Timeout error persists after retries")
+                        raise Exception("Website timeout error persists after all retries")
 
                 # Wait for RoR view content so we don't extract while page is still loading/navigating
                 try:
@@ -1143,15 +1167,22 @@ class BhulekhScraper:
                 
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Error processing Khatiyan {khatiyan_value}, retrying (attempt {attempt + 1}/{max_retries}): {e}")
-                    await self.human_delay(0.8, 1.5)
+                    wait = _KHATIYAN_RETRY_BACKOFF[min(attempt, len(_KHATIYAN_RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        "Error on Khatiyan %s (attempt %d/%d), retrying in %ds: %s",
+                        khatiyan_value, attempt + 1, max_retries, wait, e,
+                    )
+                    await asyncio.sleep(wait)
                     try:
                         await self.navigate_to_ror_page()
                         await self._reselect_district_tahasil_village(tahasil_value, village_value)
                     except Exception as nav_e:
                         logger.warning("Reselect after error failed: %s", nav_e)
                 else:
-                    logger.error(f"Error processing Khatiyan {khatiyan_value} after {max_retries} attempts: {e}")
+                    logger.error(
+                        "Khatiyan %s failed after %d attempts: %s",
+                        khatiyan_value, max_retries, e,
+                    )
                     return False
         return False
     
@@ -1376,6 +1407,42 @@ class BhulekhScraper:
                 self._current_district_value = None
                 self._current_district_text = None
     
+    async def _restart_browser(self, headless: bool = True) -> bool:
+        """
+        Fully close and reopen the browser.
+
+        Called after a run of consecutive village failures to recover from stale
+        browser / connection state.  Retries navigation with exponential backoff.
+        Returns True on success, False if it still cannot reach the site.
+        """
+        logger.warning("Restarting browser (full restart)…")
+        try:
+            await self.cleanup()
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
+        for attempt in range(5):
+            try:
+                await self.init_browser(headless=headless)
+                await self.navigate_to_ror_page()
+                logger.info("Browser restarted and site reachable.")
+                return True
+            except Exception as e:
+                wait = _SITE_BACKOFF[min(attempt, len(_SITE_BACKOFF) - 1)]
+                logger.warning(
+                    "Browser restart attempt %d/5 failed (%s), waiting %ds…",
+                    attempt + 1, e, wait,
+                )
+                try:
+                    await self.cleanup()
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+
+        logger.error("Browser restart failed after 5 attempts — will keep trying on next village claim.")
+        return False
+
     async def cleanup(self):
         """Clean up browser resources."""
         try:
@@ -1575,10 +1642,29 @@ class BhulekhScraper:
         def _heartbeat(vid):
             return _queue.heartbeat(vid) if _is_remote else heartbeat(queue_path, vid)
 
-        await self.init_browser(headless=headless)
-        await self.navigate_to_ror_page()
+        # ── Initial browser start with retry ──────────────────────────────────
+        for _init_attempt in range(5):
+            try:
+                await self.init_browser(headless=headless)
+                await self.navigate_to_ror_page()
+                break
+            except Exception as _e:
+                _wait = _SITE_BACKOFF[min(_init_attempt, len(_SITE_BACKOFF) - 1)]
+                logger.warning(
+                    "Worker %s: initial navigation failed (attempt %d/5), waiting %ds: %s",
+                    worker_id, _init_attempt + 1, _wait, _e,
+                )
+                try:
+                    await self.cleanup()
+                except Exception:
+                    pass
+                if _init_attempt == 4:
+                    raise
+                await asyncio.sleep(_wait)
 
         logger.info("Worker %s: ready, drawing villages from queue %s", worker_id, queue_path)
+
+        _consecutive_failures = 0   # tracks how many villages in a row have failed
 
         while True:
             village_info = _claim()
@@ -1600,6 +1686,7 @@ class BhulekhScraper:
                 worker_id, vil_name, vil_code, tah_name, d_name,
             )
 
+            village_ok = False
             try:
                 # Set up persistent storage for this district
                 if self.data_dir:
@@ -1637,15 +1724,22 @@ class BhulekhScraper:
                         _heartbeat(v_id)
 
                 hb_task = asyncio.create_task(_heartbeat_loop())
-
                 try:
-                    await self.process_village(
-                        village_value=vil_code,
-                        village_text=vil_name,
-                        district=d_name,
-                        tahasil=tah_name,
-                        tahasil_value=tah_code,
-                        start_after_khatiyan_value=resume_kh,
+                    # Hard per-village timeout — if the site hangs for >15 min, abort & move on
+                    await asyncio.wait_for(
+                        self.process_village(
+                            village_value=vil_code,
+                            village_text=vil_name,
+                            district=d_name,
+                            tahasil=tah_name,
+                            tahasil_value=tah_code,
+                            start_after_khatiyan_value=resume_kh,
+                        ),
+                        timeout=_VILLAGE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    raise Exception(
+                        f"Village timed out after {_VILLAGE_TIMEOUT}s — site likely unresponsive"
                     )
                 finally:
                     hb_task.cancel()
@@ -1657,6 +1751,7 @@ class BhulekhScraper:
                 )
                 # Reset per-village counter
                 self.khatiyans_processed = 0
+                village_ok = True
 
             except Exception as e:
                 logger.error("Worker %s: error on village %s: %s", worker_id, vil_name, e)
@@ -1666,6 +1761,33 @@ class BhulekhScraper:
                     await self.navigate_to_ror_page()
                 except Exception:
                     pass
+
+            # ── Site-down backoff ──────────────────────────────────────────────
+            if village_ok:
+                _consecutive_failures = 0
+            else:
+                _consecutive_failures += 1
+                if _consecutive_failures >= _SITE_DOWN_THRESHOLD:
+                    _idx = min(
+                        _consecutive_failures - _SITE_DOWN_THRESHOLD,
+                        len(_SITE_BACKOFF) - 1,
+                    )
+                    _wait = _SITE_BACKOFF[_idx]
+                    logger.warning(
+                        "Worker %s: %d consecutive failures — site appears down. "
+                        "Waiting %ds before restarting browser…",
+                        worker_id, _consecutive_failures, _wait,
+                    )
+                    await asyncio.sleep(_wait)
+                    ok = await self._restart_browser(headless=headless)
+                    if not ok:
+                        # Still can't reach the site; wait another cycle before claiming next village
+                        extra = _SITE_BACKOFF[min(_idx + 1, len(_SITE_BACKOFF) - 1)]
+                        logger.warning(
+                            "Worker %s: browser restart failed, waiting another %ds…",
+                            worker_id, extra,
+                        )
+                        await asyncio.sleep(extra)
 
         await self.cleanup()
 
