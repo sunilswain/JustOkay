@@ -31,6 +31,8 @@ from typing import Any, Dict, Iterator, List, Optional
 # ── Column order in output CSV ────────────────────────────────────────────────
 
 HEADER = [
+    # Serial number (added during export, not stored in DB)
+    "sl_no",
     # Location
     "district", "tahasil", "village",
     "mouja", "tehsil", "thana", "tehsil_no", "thana_no",
@@ -53,6 +55,32 @@ HEADER = [
 ]
 
 
+# ── Text sanitiser ────────────────────────────────────────────────────────────
+
+def _clean(v: str) -> str:
+    """Replace embedded newlines / carriage-returns / tabs with a single space."""
+    if not v:
+        return v
+    return v.replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
+
+
+# ── Khatiyan sort-key helper ──────────────────────────────────────────────────
+
+import re as _re
+
+def _khatiyan_sort_key(val: str) -> tuple:
+    """
+    Return a (int_prefix, remainder) tuple so khatiyans sort numerically.
+    '1', '2', '10' → (1,''), (2,''), (10,'')  instead of lexicographic '1','10','2'.
+    '1-kha', '2-kha' → (1,'-kha'), (2,'-kha')
+    """
+    val = val.strip()
+    m = _re.match(r"^(\d+)(.*)", val)
+    if m:
+        return (int(m.group(1)), m.group(2).strip())
+    return (0, val)
+
+
 # ── RoR flattener — handles two layout types ──────────────────────────────────
 
 def _get(d: dict, *keys, default="") -> str:
@@ -60,7 +88,7 @@ def _get(d: dict, *keys, default="") -> str:
     for k in keys:
         v = d.get(k)
         if v is not None:
-            return str(v).strip()
+            return _clean(str(v).strip())
     return default
 
 
@@ -144,16 +172,33 @@ def flatten_ror(record: dict) -> List[dict]:
 
 # ── Readers for each storage backend ─────────────────────────────────────────
 
-def _read_sqlite(db_path: Path) -> Iterator[dict]:
+def _read_sqlite(db_path: Path, sort: bool = True) -> Iterator[dict]:
+    """
+    Read khatiyans from a district SQLite file.
+    When sort=True, records are returned sorted by:
+      tahasil → village → khatiyan_value (numerically).
+    Sorting is done in Python after loading the district's records,
+    so memory usage is bounded per district (~20-100 MB each).
+    """
     con = sqlite3.connect(str(db_path))
     try:
+        records = []
         for row in con.execute("SELECT data_json FROM khatiyans ORDER BY id"):
             try:
-                yield json.loads(row[0])
+                records.append(json.loads(row[0]))
             except json.JSONDecodeError:
                 pass
     finally:
         con.close()
+
+    if sort:
+        records.sort(key=lambda r: (
+            _clean(str(r.get("tahasil", "") or "")),
+            _clean(str(r.get("village", "") or "")),
+            _khatiyan_sort_key(_clean(str(r.get("khatiyan_value", "") or r.get("khatiyan_text", "") or ""))),
+        ))
+
+    yield from records
 
 
 def _read_ndjson(ndjson_path: Path) -> Iterator[dict]:
@@ -171,16 +216,27 @@ def _read_ndjson(ndjson_path: Path) -> Iterator[dict]:
 def iter_all_records(
     data_dir: str,
     district_filter: Optional[List[int]] = None,
+    sort: bool = True,
 ) -> Iterator[dict]:
-    """Yield every raw RoR record from all district files."""
+    """
+    Yield every raw RoR record from all district files.
+    Files are processed in alphabetical order of their name (= district name order).
+    Within each district file records are sorted by tahasil → village → khatiyan
+    when sort=True (the default).
+    """
     root = Path(data_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
-    # Collect all district files
-    db_files    = sorted(root.glob("district_*.db"))
+    # Collect all district files — sort by filename for consistent district order
+    db_files     = sorted(root.glob("district_*.db"))
     ndjson_files = sorted(root.glob("district_*.ndjson"))
-    all_files   = [(f, "sqlite") for f in db_files] + [(f, "ndjson") for f in ndjson_files]
+
+    # Prefer .db over .ndjson when both exist for the same district
+    seen_stems = {f.stem for f in db_files}
+    ndjson_files = [f for f in ndjson_files if f.stem not in seen_stems]
+
+    all_files = [(f, "sqlite") for f in db_files] + [(f, "ndjson") for f in ndjson_files]
 
     if not all_files:
         print(f"No district files found in {data_dir}", file=sys.stderr)
@@ -188,9 +244,9 @@ def iter_all_records(
 
     for path, kind in all_files:
         if kind == "sqlite":
-            records = _read_sqlite(path)
+            records = _read_sqlite(path, sort=sort)
         else:
-            records = _read_ndjson(path)
+            records = _read_ndjson(path)   # ndjson stays unsorted for now
 
         for record in records:
             # Optional district filter (match on district_code or district name)
@@ -209,9 +265,11 @@ def export(
     separator: str = ",",
     district_filter: Optional[List[int]] = None,
     stats_only: bool = False,
+    sort: bool = True,
 ) -> None:
     total_records = 0
     total_rows    = 0
+    sl_no         = 0          # running serial number across all rows
 
     if stats_only:
         root = Path(data_dir)
@@ -226,7 +284,9 @@ def export(
         return
 
     out = Path(out_path)
-    print(f"Exporting to {out} …")
+    print(f"Exporting to {out} ...")
+    if sort:
+        print("  (sorting within each district: tahasil > village > khatiyan)")
 
     with open(out, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(
@@ -234,20 +294,22 @@ def export(
             fieldnames=HEADER,
             delimiter=separator,
             extrasaction="ignore",
-            quoting=csv.QUOTE_ALL,
+            quoting=csv.QUOTE_MINIMAL,   # only quote when necessary → cleaner file
         )
         writer.writeheader()
 
-        for record in iter_all_records(data_dir, district_filter):
+        for record in iter_all_records(data_dir, district_filter, sort=sort):
             total_records += 1
             for row in flatten_ror(record):
+                sl_no += 1
+                row["sl_no"] = sl_no
                 writer.writerow(row)
                 total_rows += 1
 
             if total_records % 10_000 == 0:
-                print(f"  … {total_records:,} khatiyans → {total_rows:,} rows", end="\r")
+                print(f"  ... {total_records:,} khatiyans -> {total_rows:,} rows", end="\r")
 
-    print(f"\nDone: {total_records:,} khatiyans → {total_rows:,} rows → {out}")
+    print(f"\nDone: {total_records:,} khatiyans -> {total_rows:,} rows -> {out}")
     size_mb = out.stat().st_size / 1_048_576
     print(f"File size: {size_mb:.1f} MB")
 
@@ -264,6 +326,8 @@ def main() -> None:
                         help="Only export records from these district codes")
     parser.add_argument("--stats-only", action="store_true",
                         help="Just show record counts per district, don't export")
+    parser.add_argument("--no-sort", action="store_true",
+                        help="Skip per-district sorting (faster for very large exports)")
     args = parser.parse_args()
 
     sep_map = {"comma": ",", "tab": "\t", "pipe": "|"}
@@ -275,6 +339,7 @@ def main() -> None:
         separator=sep,
         district_filter=args.districts,
         stats_only=args.stats_only,
+        sort=not args.no_sort,
     )
 
 
