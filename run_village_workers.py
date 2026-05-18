@@ -149,9 +149,12 @@ def main() -> None:
     parser.add_argument("--districts", nargs="+", type=int, metavar="CODE",
                         help="Only process these district codes (e.g. --districts 3 14)")
     parser.add_argument("--priority-districts", nargs="+", type=int, default=[], metavar="CODE",
-                        help="Boost these districts to the front of the queue before starting workers")
+                        help="Boost these district codes to the front of the queue before starting workers")
+    parser.add_argument("--priority-tahasils", nargs="+", default=[], metavar="NAME",
+                        help="Boost these tahasil names to the front of the queue (Odia text). "
+                             "Use with --priority-districts to restrict to a specific district.")
     parser.add_argument("--priority-level", type=int, default=10,
-                        help="Priority value used with --priority-districts (default: 10)")
+                        help="Priority value used with --priority-districts/--priority-tahasils (default: 10)")
     parser.add_argument("--limit-khatiyans", type=int, default=None, metavar="N",
                         help="Stop each worker after N khatiyans total (for testing)")
     args = parser.parse_args()
@@ -174,14 +177,27 @@ def main() -> None:
         sys.exit(1)
 
     # Apply priority boost before starting workers
-    if args.priority_districts:
-        from work_queue import make_queue, set_priority
+    if args.priority_districts or args.priority_tahasils:
+        from work_queue import make_queue, set_priority, set_priority_tahasils
         q = make_queue(args.db, api_key=args.key)
-        if hasattr(q, 'set_priority'):
-            n = q.set_priority(args.priority_districts, args.priority_level)
-        else:
-            n = set_priority(args.db, args.priority_districts, args.priority_level)
-        print(f"Priority={args.priority_level} set for {n} villages in districts {args.priority_districts}")
+
+        if args.priority_districts:
+            if hasattr(q, 'set_priority'):
+                n = q.set_priority(args.priority_districts, args.priority_level)
+            else:
+                n = set_priority(args.db, args.priority_districts, args.priority_level)
+            print(f"Priority={args.priority_level} set for {n} villages in districts {args.priority_districts}")
+
+        if args.priority_tahasils:
+            # Restrict tahasil boost to the given districts if both are specified
+            d_filter = args.priority_districts if args.priority_districts else None
+            n = set_priority_tahasils(
+                args.db,
+                args.priority_tahasils,
+                args.priority_level,
+                district_codes=d_filter,
+            )
+            print(f"Priority={args.priority_level} set for {n} villages in tahasils {args.priority_tahasils}")
 
     _print_stats(args.db)
 
