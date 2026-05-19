@@ -33,8 +33,8 @@ $UV sync --quiet
 # ── 3. Update service file if changed ────────────────────────────────────────
 if ! diff -q "$PROJECT_DIR/bhulekh.service" /etc/systemd/system/bhulekh.service &>/dev/null; then
     log "Service file changed — updating systemd..."
-    cp "$PROJECT_DIR/bhulekh.service" /etc/systemd/system/bhulekh.service
-    systemctl daemon-reload
+    sudo cp "$PROJECT_DIR/bhulekh.service" /etc/systemd/system/bhulekh.service
+    sudo systemctl daemon-reload
 fi
 
 log "Done."

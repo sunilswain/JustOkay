@@ -11,7 +11,7 @@ User=ubuntu
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/home/ubuntu/justokay
 ExecStart=/home/ubuntu/.local/bin/uv run python run_village_workers.py \
-    --workers 40 \
+    --workers 20 \
     --db /home/ubuntu/justokay/work_queue.db \
     --data-dir /home/ubuntu/justokay/bhulekh_data \
     --headless \
