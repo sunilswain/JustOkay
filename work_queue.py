@@ -100,7 +100,9 @@ def make_queue(db_or_url: str, api_key: Optional[str] = None):
     return db_or_url  # local path — use existing functions directly
 
 DEFAULT_QUEUE_PATH = "work_queue.db"
-CLAIM_TIMEOUT_SECONDS = 3600  # 1 hour: if worker dies, village is reclaimed after this
+# If a worker dies mid-village, the village is reclaimed after this many seconds.
+# Must be longer than _VILLAGE_TIMEOUT (600s) + some buffer.
+CLAIM_TIMEOUT_SECONDS = 1800  # 30 min (was 1 hour — faster recovery when a worker crashes)
 
 
 @contextmanager
@@ -300,36 +302,56 @@ def complete_village(db_path: str, village_id: int, khatiyans_fetched: int) -> N
 
 def fail_village(db_path: str, village_id: int, error_msg: str) -> None:
     """
-    Mark a village as failed. If below max_retries, reset to pending so
-    another worker can retry it. Otherwise mark permanently as error.
+    Mark a village as failed.
+
+    Key rule: if the worker made *any* progress (khatiyans_fetched > 0 and a
+    checkpoint exists), reset retries to 0 and put it back to pending.  This
+    prevents large villages from being permanently errored just because they
+    timed out mid-way — they will keep resuming from last_khatiyan_no until
+    fully done.  Only villages that fail from the very start (no progress)
+    consume retry budget.
     """
     with _conn(db_path) as con:
         row = con.execute(
-            "SELECT retries, max_retries FROM villages WHERE id = ?",
+            "SELECT retries, max_retries, khatiyans_fetched, last_khatiyan_no FROM villages WHERE id = ?",
             (village_id,),
         ).fetchone()
         if row is None:
             return
-        retries, max_retries = row
-        new_retries = retries + 1
-        if new_retries < max_retries:
+        retries, max_retries, kh_fetched, last_kh = row
+
+        # If we have a valid resume checkpoint, don't count this as a retry failure.
+        made_progress = (kh_fetched or 0) > 0 and last_kh
+        if made_progress:
             con.execute("""
                 UPDATE villages
-                SET    status    = 'pending',
-                       retries   = ?,
-                       error_msg = ?,
-                       worker_id = NULL,
+                SET    status     = 'pending',
+                       retries    = 0,
+                       error_msg  = ?,
+                       worker_id  = NULL,
                        claimed_at = NULL
                 WHERE  id = ?
-            """, (new_retries, error_msg[:500], village_id))
+            """, (error_msg[:500], village_id))
         else:
-            con.execute("""
-                UPDATE villages
-                SET    status    = 'error',
-                       retries   = ?,
-                       error_msg = ?
-                WHERE  id = ?
-            """, (new_retries, error_msg[:500], village_id))
+            new_retries = retries + 1
+            if new_retries < max_retries:
+                con.execute("""
+                    UPDATE villages
+                    SET    status     = 'pending',
+                           retries    = ?,
+                           error_msg  = ?,
+                           worker_id  = NULL,
+                           claimed_at = NULL
+                    WHERE  id = ?
+                """, (new_retries, error_msg[:500], village_id))
+            else:
+                con.execute("""
+                    UPDATE villages
+                    SET    status    = 'error',
+                           retries   = ?,
+                           error_msg = ?
+                    WHERE  id = ?
+                """, (new_retries, error_msg[:500], village_id))
 
 
 def get_stats(db_path: str) -> dict:
@@ -404,6 +426,25 @@ def set_priority_tahasils(
                 {district_filter}""",
             params,
         )
+        return cur.rowcount
+
+
+def reclaim_stuck_villages(db_path: str) -> int:
+    """
+    Immediately release ALL in_progress villages back to pending.
+
+    Call once at startup before workers begin.  Without this, villages from
+    a previous crashed run are locked for CLAIM_TIMEOUT_SECONDS (30 min)
+    before workers can pick them up again.
+    """
+    with _conn(db_path) as con:
+        cur = con.execute("""
+            UPDATE villages
+            SET    status     = 'pending',
+                   worker_id  = NULL,
+                   claimed_at = NULL
+            WHERE  status = 'in_progress'
+        """)
         return cur.rowcount
 
 
@@ -493,6 +534,8 @@ if __name__ == "__main__":
                    help="Create (or verify) the queue database schema")
     sub.add_parser("reset-errors", parents=[_db_parent], add_help=False,
                    help="Reset all errored villages back to pending")
+    sub.add_parser("reclaim",      parents=[_db_parent], add_help=False,
+                   help="Release all stuck in_progress villages back to pending (run after a crash)")
 
     ta = sub.add_parser("tahasils", parents=[_db_parent], add_help=False,
                         help="Show tahasil-level completion breakdown")
@@ -581,6 +624,10 @@ if __name__ == "__main__":
     elif args.cmd == "reset-errors":
         n = reset_errors(db)
         print(f"Reset {n} errored villages back to pending")
+
+    elif args.cmd == "reclaim":
+        n = reclaim_stuck_villages(db)
+        print(f"Released {n} stuck in_progress villages back to pending")
 
     else:
         parser.print_help()

@@ -39,15 +39,20 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import shutil
 import socket
 import sys
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bhulekh_scraper import BhulekhScraper, logger
-from work_queue import create_queue, get_stats
+from work_queue import create_queue, get_stats, reclaim_stuck_villages, reset_errors
 from storage import DEFAULT_DATA_DIR
+
+_ERROR_RESET_INTERVAL = 1800  # auto-reset error villages every 30 minutes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +62,25 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
+
+
+def _check_disk_space(path: str = ".") -> float:
+    """Return free disk space in GB for the filesystem containing `path`."""
+    return shutil.disk_usage(path).free / (1024 ** 3)
+
+
+def _error_reset_thread(queue_path: str, stop_event: threading.Event) -> None:
+    """
+    Background thread: every 30 minutes, reset error villages back to pending
+    so transient failures don't permanently block villages.
+    """
+    while not stop_event.wait(_ERROR_RESET_INTERVAL):
+        try:
+            n = reset_errors(queue_path)
+            if n:
+                logger.info("Auto-reset %d error villages back to pending", n)
+        except Exception as e:
+            logger.warning("Error-reset thread failed: %s", e)
 
 
 def _worker_main(
@@ -176,7 +200,31 @@ def main() -> None:
         print("Run first:  python soap_enumerator.py --db", args.db)
         sys.exit(1)
 
-    # Apply priority boost before starting workers
+    # ── Pre-flight checks ─────────────────────────────────────────────────────
+    # 1. Disk space warning
+    free_gb = _check_disk_space(args.data_dir if os.path.isdir(args.data_dir) else ".")
+    if free_gb < 2.0:
+        logger.error(
+            "DISK SPACE LOW: only %.1f GB free — risk of data loss! "
+            "Free up space before continuing.",
+            free_gb,
+        )
+        sys.exit(1)
+    elif free_gb < 5.0:
+        logger.warning("Disk space low: %.1f GB free. Consider freeing up space.", free_gb)
+    else:
+        logger.info("Disk space OK: %.1f GB free", free_gb)
+
+    # 2. Reclaim any villages stuck in_progress from a previous crashed run
+    if not is_remote:
+        stuck = reclaim_stuck_villages(args.db)
+        if stuck:
+            logger.info(
+                "Reclaimed %d villages that were stuck in_progress from a previous run.",
+                stuck,
+            )
+
+    # ── Apply priority boost before starting workers ───────────────────────
     if args.priority_districts or args.priority_tahasils:
         from work_queue import make_queue, set_priority, set_priority_tahasils
         q = make_queue(args.db, api_key=args.key)
@@ -205,6 +253,18 @@ def main() -> None:
     delay_scale = 0.15 if args.fast else 1.0
     hostname = socket.gethostname()
 
+    # Start error-reset background thread (only for local queue)
+    _stop_event = threading.Event()
+    if not is_remote:
+        _err_thread = threading.Thread(
+            target=_error_reset_thread,
+            args=(args.db, _stop_event),
+            daemon=True,
+            name="ErrorReset",
+        )
+        _err_thread.start()
+        logger.info("Error-reset thread started (resets error villages every %ds)", _ERROR_RESET_INTERVAL)
+
     processes = []
     for i in range(n_workers):
         worker_id = f"{hostname}-{os.getpid()}-w{i}"
@@ -231,6 +291,7 @@ def main() -> None:
     for p in processes:
         p.join()
 
+    _stop_event.set()  # stop the error-reset thread
     logger.info("All workers finished.")
     _print_stats(args.db)
 

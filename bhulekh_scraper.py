@@ -100,6 +100,10 @@ _SITE_BACKOFF = [30, 60, 120, 300, 600, 1200]
 # Total patience before exit: ~2*_VILLAGE_TIMEOUT + sum(_SITE_BACKOFF) ≈ 38 min.
 _SITE_DOWN_EXIT_AFTER = _SITE_DOWN_THRESHOLD + len(_SITE_BACKOFF)
 
+# Restart the browser every N successfully completed villages to prevent
+# Chromium memory leaks from slowly eating all RAM.
+_BROWSER_RESTART_EVERY = 40
+
 
 class BhulekhScraper:
     """Main scraper class for Bhulekh website automation."""
@@ -1411,6 +1415,23 @@ class BhulekhScraper:
                 self._current_district_value = None
                 self._current_district_text = None
     
+    @staticmethod
+    async def _check_spot_termination() -> bool:
+        """
+        Returns True if an AWS Spot Instance termination notice is active.
+        Polls the EC2 instance metadata endpoint (only reachable inside AWS).
+        On non-AWS machines or network errors this always returns False.
+        """
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=1.5) as c:
+                r = await c.get(
+                    "http://169.254.169.254/latest/meta-data/spot/termination-time"
+                )
+                return r.status_code == 200
+        except Exception:
+            return False
+
     async def _restart_browser(self, headless: bool = True) -> bool:
         """
         Fully close and reopen the browser.
@@ -1669,8 +1690,18 @@ class BhulekhScraper:
         logger.info("Worker %s: ready, drawing villages from queue %s", worker_id, queue_path)
 
         _consecutive_failures = 0   # tracks how many villages in a row have failed
+        _villages_done = 0          # for periodic browser restart
 
         while True:
+            # ── Spot termination check ─────────────────────────────────────────
+            if await self._check_spot_termination():
+                logger.critical(
+                    "Worker %s: AWS Spot termination notice received — "
+                    "releasing any claimed village and exiting cleanly.",
+                    worker_id,
+                )
+                break
+
             village_info = _claim()
             if village_info is None:
                 logger.info("Worker %s: no more pending villages — done.", worker_id)
@@ -1756,6 +1787,15 @@ class BhulekhScraper:
                 # Reset per-village counter
                 self.khatiyans_processed = 0
                 village_ok = True
+                _villages_done += 1
+
+                # Periodic browser restart to prevent Chromium memory leaks
+                if _villages_done % _BROWSER_RESTART_EVERY == 0:
+                    logger.info(
+                        "Worker %s: periodic browser restart after %d villages (memory hygiene)",
+                        worker_id, _villages_done,
+                    )
+                    await self._restart_browser(headless=headless)
 
             except Exception as e:
                 logger.error("Worker %s: error on village %s: %s", worker_id, vil_name, e)
@@ -1800,12 +1840,12 @@ class BhulekhScraper:
                     await asyncio.sleep(_wait)
                     ok = await self._restart_browser(headless=headless)
                     if not ok:
-                        extra = _SITE_BACKOFF[min(_idx + 1, len(_SITE_BACKOFF) - 1)]
-                        logger.warning(
-                            "Worker %s: browser restart failed, waiting another %ds…",
-                            worker_id, extra,
+                        logger.error(
+                            "Worker %s: browser restart failed completely — "
+                            "exiting so systemd can restart with a fresh browser.",
+                            worker_id,
                         )
-                        await asyncio.sleep(extra)
+                        break
 
         await self.cleanup()
 
