@@ -431,7 +431,7 @@ def list_districts(db_path: str) -> list:
 
 
 def list_tahasils(db_path: str, district_codes: Optional[list] = None) -> list:
-    """Return all distinct tahasils in the queue, optionally filtered by district."""
+    """Return all distinct tahasils with full status breakdown, optionally filtered by district."""
     filter_sql = ""
     params: list = []
     if district_codes:
@@ -440,14 +440,19 @@ def list_tahasils(db_path: str, district_codes: Optional[list] = None) -> list:
         params = list(district_codes)
     with _conn(db_path) as con:
         return con.execute(f"""
-            SELECT district_name, tahasil_code, tahasil_name,
+            SELECT district_name, tahasil_name,
                    COUNT(*) AS villages,
-                   SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done,
-                   MAX(priority) AS priority
+                   SUM(CASE WHEN status='done'        THEN 1 ELSE 0 END) AS done,
+                   SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) AS in_progress,
+                   SUM(CASE WHEN status='pending'     THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN status='error'       THEN 1 ELSE 0 END) AS errors,
+                   SUM(khatiyans_fetched)                                 AS fetched,
+                   SUM(khatiyan_count)                                    AS est_khatiyans,
+                   MAX(priority)                                          AS priority
             FROM   villages
             {filter_sql}
             GROUP BY district_code, tahasil_code
-            ORDER BY priority DESC, district_name, tahasil_name
+            ORDER BY district_name, priority DESC, tahasil_name
         """, params).fetchall()
 
 
@@ -466,69 +471,105 @@ def _now_minus(seconds: int) -> str:
 if __name__ == "__main__":
     import argparse, sys
 
-    parser = argparse.ArgumentParser(description="Work queue inspection/management tool")
+    # Shared --db parent so every subcommand accepts it after the subcommand name.
+    # e.g.  work_queue.py tahasils --districts 3 --db /path/to/work_queue.db
+    _db_parent = argparse.ArgumentParser(add_help=False)
+    _db_parent.add_argument(
+        "--db", default=DEFAULT_QUEUE_PATH, metavar="PATH",
+        help=f"Queue DB path (default: {DEFAULT_QUEUE_PATH})",
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Work queue inspection/management tool",
+        parents=[_db_parent],
+    )
     sub = parser.add_subparsers(dest="cmd")
 
-    sub.add_parser("stats",     help="Show progress statistics")
-    sub.add_parser("districts", help="List districts and their completion")
-    sub.add_parser("create",    help="Create (or verify) the queue database")
+    sub.add_parser("stats",     parents=[_db_parent], add_help=False,
+                   help="Show overall progress statistics")
+    sub.add_parser("districts", parents=[_db_parent], add_help=False,
+                   help="List all districts with completion %")
+    sub.add_parser("create",    parents=[_db_parent], add_help=False,
+                   help="Create (or verify) the queue database schema")
+    sub.add_parser("reset-errors", parents=[_db_parent], add_help=False,
+                   help="Reset all errored villages back to pending")
 
-    pr = sub.add_parser("priority", help="Boost priority for district codes or tahasil names")
+    ta = sub.add_parser("tahasils", parents=[_db_parent], add_help=False,
+                        help="Show tahasil-level completion breakdown")
+    ta.add_argument("--districts", nargs="+", type=int, default=[], metavar="CODE",
+                    help="Filter by district code(s), e.g. --districts 3")
+
+    pr = sub.add_parser("priority", parents=[_db_parent], add_help=False,
+                        help="Boost priority for district codes or tahasil names")
     pr.add_argument("--districts", nargs="+", type=int, default=[],
                     help="District codes to boost (e.g. --districts 3 14)")
     pr.add_argument("--tahasils", nargs="+", default=[],
-                    help="Tahasil names to boost (Odia text, e.g. --tahasils ନରସିଂହପୁର ବଡ଼ମ୍ବା)")
+                    help="Tahasil names to boost (Odia text)")
     pr.add_argument("--level", type=int, default=10,
                     help="Priority value (higher = processed first, default: 10)")
 
-    ta = sub.add_parser("tahasils", help="List tahasils and their completion")
-    ta.add_argument("--districts", nargs="+", type=int, default=[],
-                    help="Filter by district codes")
-
-    sub.add_parser("reset-errors", help="Reset errored villages back to pending")
-
-    parser.add_argument("--db", default=DEFAULT_QUEUE_PATH, help="Queue DB path")
     args = parser.parse_args()
 
+    # Resolve --db: subparser arg wins if present, else fall back to parent
+    db = getattr(args, "db", DEFAULT_QUEUE_PATH)
+
     if args.cmd == "create":
-        create_queue(args.db)
-        print(f"Queue created: {args.db}")
+        create_queue(db)
+        print(f"Queue created: {db}")
 
     elif args.cmd == "stats":
-        s = get_stats(args.db)
+        s = get_stats(db)
         print(f"Total villages : {s['total_villages']:,}")
         print(f"Est. khatiyans : {s['total_khatiyans_est']:,}")
         print(f"Fetched so far : {s['total_khatiyans_fetched']:,}")
+        print()
         for status, info in sorted(s["by_status"].items()):
             print(f"  {status:15s}: {info['villages']:6,} villages  "
                   f"~{info['est_khatiyans']:>10,} khatiyans")
 
     elif args.cmd == "districts":
-        rows = list_districts(args.db)
-        print(f"{'Code':>6}  {'Priority':>8}  {'Name':<30}  {'Villages':>8}  {'Done':>8}")
+        rows = list_districts(db)
+        print(f"{'Code':>6}  {'Pri':>4}  {'District':<30}  {'Total':>6}  {'Done':>6}  {'%':>5}")
+        print("-" * 72)
         for code, name, vils, done, priority in rows:
             pct = f"{100*done//vils}%" if vils else "-"
-            pri = f"*{priority}" if priority > 0 else "-"
-            print(f"{code:>6}  {pri:>8}  {name:<30}  {vils:>8,}  {done:>6,} {pct:>4}")
+            pri = str(priority) if priority > 0 else "-"
+            print(f"{code:>6}  {pri:>4}  {name:<30}  {vils:>6,}  {done:>6,}  {pct:>5}")
 
     elif args.cmd == "tahasils":
         d_filter = args.districts if args.districts else None
-        rows = list_tahasils(args.db, district_codes=d_filter)
-        print(f"{'District':<20}  {'Priority':>8}  {'Tahasil':<25}  {'Villages':>8}  {'Done':>8}")
-        for dist, t_code, t_name, vils, done, priority in rows:
+        rows = list_tahasils(db, district_codes=d_filter)
+        if not rows:
+            print("No tahasils found (check --districts filter or --db path).")
+            sys.exit(0)
+
+        hdr = (f"{'District':<22}  {'Tahasil':<25}  "
+               f"{'Total':>5}  {'Done':>5}  {'Active':>6}  {'Pend':>5}  {'Err':>4}  "
+               f"{'Fetched':>8}  {'Est':>8}  {'%':>5}  {'Pri':>4}")
+        print(hdr)
+        print("-" * len(hdr))
+        prev_dist = None
+        for dist, t_name, vils, done, active, pend, errors, fetched, est, priority in rows:
+            if prev_dist and dist != prev_dist:
+                print()
+            prev_dist = dist
             pct = f"{100*done//vils}%" if vils else "-"
-            pri = f"*{priority}" if priority > 0 else "-"
-            print(f"{dist:<20}  {pri:>8}  {t_name:<25}  {vils:>8,}  {done:>6,} {pct:>4}")
+            pri = str(priority) if priority > 0 else "-"
+            print(
+                f"{dist:<22}  {t_name:<25}  "
+                f"{vils:>5,}  {done:>5,}  {active:>6,}  {pend:>5,}  {errors:>4,}  "
+                f"{fetched or 0:>8,}  {est or 0:>8,}  {pct:>5}  {pri:>4}"
+            )
 
     elif args.cmd == "priority":
         total = 0
         if args.districts:
-            n = set_priority(args.db, args.districts, args.level)
+            n = set_priority(db, args.districts, args.level)
             print(f"Set priority={args.level} for {n} villages in districts {args.districts}")
             total += n
         if args.tahasils:
             d_filter = args.districts if args.districts else None
-            n = set_priority_tahasils(args.db, args.tahasils, args.level, district_codes=d_filter)
+            n = set_priority_tahasils(db, args.tahasils, args.level, district_codes=d_filter)
             print(f"Set priority={args.level} for {n} villages in tahasils {args.tahasils}")
             total += n
         if not args.districts and not args.tahasils:
@@ -537,7 +578,7 @@ if __name__ == "__main__":
         print(f"Total villages updated: {total}")
 
     elif args.cmd == "reset-errors":
-        n = reset_errors(args.db)
+        n = reset_errors(db)
         print(f"Reset {n} errored villages back to pending")
 
     else:
