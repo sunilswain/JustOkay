@@ -544,8 +544,8 @@ if __name__ == "__main__":
             sys.exit(0)
 
         hdr = (f"{'District':<22}  {'Tahasil':<25}  "
-               f"{'Total':>5}  {'Done':>5}  {'Active':>6}  {'Pend':>5}  {'Err':>4}  "
-               f"{'Fetched':>8}  {'Est':>8}  {'%':>5}  {'Pri':>4}")
+               f"{'Vil':>5}  {'Done':>5}  {'Active':>6}  {'Pend':>5}  {'Err':>4}  "
+               f"{'Fetched':>8}  {'Est.Kh':>8}  {'Vil%':>5}  {'Kh%':>5}  {'Pri':>4}")
         print(hdr)
         print("-" * len(hdr))
         prev_dist = None
@@ -553,12 +553,13 @@ if __name__ == "__main__":
             if prev_dist and dist != prev_dist:
                 print()
             prev_dist = dist
-            pct = f"{100*done//vils}%" if vils else "-"
+            vil_pct = f"{100*done//vils}%"  if vils               else "-"
+            kh_pct  = f"{100*fetched//est}%" if (est and fetched)  else "-"
             pri = str(priority) if priority > 0 else "-"
             print(
                 f"{dist:<22}  {t_name:<25}  "
                 f"{vils:>5,}  {done:>5,}  {active:>6,}  {pend:>5,}  {errors:>4,}  "
-                f"{fetched or 0:>8,}  {est or 0:>8,}  {pct:>5}  {pri:>4}"
+                f"{fetched or 0:>8,}  {est or 0:>8,}  {vil_pct:>5}  {kh_pct:>5}  {pri:>4}"
             )
 
     elif args.cmd == "priority":
