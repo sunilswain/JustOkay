@@ -81,7 +81,7 @@ SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, 
 # ── Resilience tunables ────────────────────────────────────────────────────────
 # Per-village hard timeout (seconds).  If a village takes longer than this the
 # worker aborts it (marks failed → will be re-claimed later) and moves on.
-_VILLAGE_TIMEOUT = 900          # 15 minutes
+_VILLAGE_TIMEOUT = 600          # 10 minutes (was 900 — shorter = faster failure detection)
 
 # Backoff between retries inside process_khatiyan (seconds).
 # 4 attempts total; wait grows: 5 → 20 → 60 → 180 s
@@ -89,12 +89,16 @@ _KHATIYAN_RETRY_BACKOFF = [5, 20, 60, 180]
 
 # How many consecutive village-level failures before we declare "site is down"
 # and start the long backoff + browser restart cycle.
-_SITE_DOWN_THRESHOLD = 3
+_SITE_DOWN_THRESHOLD = 2        # was 3 — trigger backoff sooner
 
 # Backoff schedule (seconds) when site-down is detected.
 # Each consecutive failure after the threshold adds one step.
-# [60, 120, 300, 600, 1200, 1800] → up to 30 min between retries.
-_SITE_BACKOFF = [60, 120, 300, 600, 1200, 1800]
+_SITE_BACKOFF = [30, 60, 120, 300, 600, 1200]
+
+# After exhausting ALL backoff steps with no recovery, the worker exits cleanly
+# so systemd can restart the service with fresh browser instances.
+# Total patience before exit: ~2*_VILLAGE_TIMEOUT + sum(_SITE_BACKOFF) ≈ 38 min.
+_SITE_DOWN_EXIT_AFTER = _SITE_DOWN_THRESHOLD + len(_SITE_BACKOFF)
 
 
 class BhulekhScraper:
@@ -1767,21 +1771,35 @@ class BhulekhScraper:
                 _consecutive_failures = 0
             else:
                 _consecutive_failures += 1
+
+                # Exit cleanly after exhausting all backoff steps — systemd will
+                # restart the service with fresh browser instances.
+                if _consecutive_failures >= _SITE_DOWN_EXIT_AFTER:
+                    logger.error(
+                        "Worker %s: %d consecutive village failures — exhausted all "
+                        "backoff attempts. Exiting so systemd can restart cleanly.",
+                        worker_id, _consecutive_failures,
+                    )
+                    break
+
                 if _consecutive_failures >= _SITE_DOWN_THRESHOLD:
                     _idx = min(
                         _consecutive_failures - _SITE_DOWN_THRESHOLD,
                         len(_SITE_BACKOFF) - 1,
                     )
-                    _wait = _SITE_BACKOFF[_idx]
+                    # Add per-worker jitter (0–15s) to prevent all 20 workers from
+                    # hammering the site simultaneously after backoff.
+                    _jitter = random.uniform(0, 15)
+                    _wait = _SITE_BACKOFF[_idx] + _jitter
                     logger.warning(
-                        "Worker %s: %d consecutive failures — site appears down. "
-                        "Waiting %ds before restarting browser…",
-                        worker_id, _consecutive_failures, _wait,
+                        "Worker %s: %d consecutive failures (step %d/%d) — "
+                        "site appears down. Waiting %.0fs before restarting browser…",
+                        worker_id, _consecutive_failures,
+                        _idx + 1, len(_SITE_BACKOFF), _wait,
                     )
                     await asyncio.sleep(_wait)
                     ok = await self._restart_browser(headless=headless)
                     if not ok:
-                        # Still can't reach the site; wait another cycle before claiming next village
                         extra = _SITE_BACKOFF[min(_idx + 1, len(_SITE_BACKOFF) - 1)]
                         logger.warning(
                             "Worker %s: browser restart failed, waiting another %ds…",
