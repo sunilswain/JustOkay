@@ -549,8 +549,12 @@ class BhulekhScraper:
             logger.warning("Page load timeout, continuing anyway")
             await self.human_delay(0.2, 0.4)
     
-    async def select_dropdown(self, selector: str, value: str, wait_for_update: bool = True):
-        """Select a value from a dropdown and wait for dependent fields to update."""
+    async def select_dropdown(self, selector: str, value: str, wait_for_update: bool = True, label: str = None):
+        """Select a value from a dropdown and wait for dependent fields to update.
+        
+        For Khatiyan dropdowns, prefer using label= parameter since the option values
+        have trailing whitespace padding that can cause matching issues.
+        """
         try:
             # Simulate human behavior: move mouse to dropdown first
             try:
@@ -560,9 +564,42 @@ class BhulekhScraper:
             except:
                 pass
             
-            # Select the option
-            await self.page.select_option(selector, value)
-            logger.info(f"Selected {value} from {selector}")
+            # For Khatiyan dropdown, use label-based selection (values have trailing spaces)
+            is_khatiyan = 'ddlBindData' in selector or 'Khatiyan' in selector
+            
+            # Select the option with timeout protection
+            try:
+                if label:
+                    await asyncio.wait_for(
+                        self.page.select_option(selector, label=label),
+                        timeout=15.0
+                    )
+                    logger.info(f"Selected label '{label}' from {selector}")
+                elif is_khatiyan:
+                    # Khatiyan values have trailing spaces; try label first using trimmed value
+                    trimmed = value.strip() if value else value
+                    try:
+                        await asyncio.wait_for(
+                            self.page.select_option(selector, label=trimmed),
+                            timeout=15.0
+                        )
+                        logger.info(f"Selected khatiyan by label '{trimmed}' from {selector}")
+                    except Exception:
+                        # Fallback to value-based selection
+                        await asyncio.wait_for(
+                            self.page.select_option(selector, value),
+                            timeout=15.0
+                        )
+                        logger.info(f"Selected khatiyan by value '{value}' from {selector}")
+                else:
+                    await asyncio.wait_for(
+                        self.page.select_option(selector, value),
+                        timeout=15.0
+                    )
+                    logger.info(f"Selected {value} from {selector}")
+            except asyncio.TimeoutError:
+                logger.error(f"TIMEOUT selecting from {selector} (value={value!r}, label={label!r})")
+                raise Exception(f"Dropdown selection timed out after 15s: {selector}")
             
             await self.human_delay(0.2, 0.4)
             
@@ -602,10 +639,14 @@ class BhulekhScraper:
         - ctl00_ContentPlaceHolder1_ddlDistrict
         - ctl00_ContentPlaceHolder1_ddlTahsil
         - ctl00_ContentPlaceHolder1_ddlVillage
-        - ctl00_ContentPlaceHolder1_ddlBindData
+        - ctl00_ContentPlaceHolder1_ddlBindData (Khatiyan - has padded values!)
         
-        Args:
-            selector: CSS selector for the dropdown (e.g., SELECTOR_DISTRICT)
+        Returns:
+            List of dicts with 'value' (raw), 'value_trimmed' (whitespace stripped), 
+            and 'text' (visible label, always trimmed).
+            
+        Note: Khatiyan dropdown values are padded to 30 chars (e.g., "01                            ").
+              Use 'value_trimmed' or select by 'text' (label) to avoid matching issues.
         """
         try:
             # Escape selector for use inside JS double-quoted string
@@ -616,6 +657,7 @@ class BhulekhScraper:
                     if (!select) return [];
                     return Array.from(select.options).map(opt => ({{
                         value: opt.value,
+                        value_trimmed: opt.value.trim(),
                         text: opt.text.trim()
                     }})).filter(opt => opt.value && opt.value !== 'Select District' && 
                                      opt.value !== 'Select Tahasil' && 
@@ -1133,8 +1175,19 @@ class BhulekhScraper:
                     pass  # continue and try extract anyway
                 await self.human_delay(0.1, 0.25)
 
-                # Extract data
-                ror_data = await self.extract_ror_data()
+                # Extract data (with timeout protection for large khatiyans)
+                logger.info(f"Starting extraction for Khatiyan {khatiyan_text}...")
+                extract_start = time.time()
+                try:
+                    ror_data = await asyncio.wait_for(
+                        self.extract_ror_data(),
+                        timeout=300.0  # 5 minute timeout for extraction (handles 750+ row khatiyans)
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"EXTRACTION TIMEOUT: Khatiyan {khatiyan_text} took >5min to extract")
+                    raise Exception(f"Data extraction timed out for Khatiyan {khatiyan_text}")
+                extract_elapsed = time.time() - extract_start
+                logger.info(f"Extraction completed for Khatiyan {khatiyan_text} in {extract_elapsed:.1f}s")
                 
                 # Add metadata
                 ror_data['district'] = district
@@ -1146,7 +1199,8 @@ class BhulekhScraper:
                 # Store data
                 self.data_list.append(ror_data)
                 self.khatiyans_processed += 1
-                self._last_khatiyan_no = khatiyan_value  # track for work-queue checkpoint on timeout
+                # Track for work-queue checkpoint on timeout (use trimmed value for consistent matching)
+                self._last_khatiyan_no = khatiyan_value.strip() if khatiyan_value else khatiyan_value
                 total = len(self.data_list)
                 # Persistent storage: append immediately so no data loss on crash
                 if self._current_storage:
