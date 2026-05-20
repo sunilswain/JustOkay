@@ -81,7 +81,7 @@ SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, 
 # ── Resilience tunables ────────────────────────────────────────────────────────
 # Per-village hard timeout (seconds).  If a village takes longer than this the
 # worker aborts it (marks failed → will be re-claimed later) and moves on.
-_VILLAGE_TIMEOUT = 600          # 10 minutes (was 900 — shorter = faster failure detection)
+_VILLAGE_TIMEOUT = 1200         # 20 minutes — allows large khatiyans (750+ rows) to complete
 
 # Backoff between retries inside process_khatiyan (seconds).
 # 4 attempts total; wait grows: 5 → 20 → 60 → 180 s
@@ -1765,9 +1765,22 @@ class BhulekhScraper:
                         await asyncio.sleep(120)
                         _heartbeat(v_id)
 
+                # Periodic checkpoint task — saves progress every 60s so nothing is lost on timeout
+                async def _checkpoint_loop():
+                    while True:
+                        await asyncio.sleep(60)
+                        if self.khatiyans_processed > 0 and self._last_khatiyan_no:
+                            kh_so_far = already_done + self.khatiyans_processed
+                            _checkpoint(v_id, kh_so_far, self._last_khatiyan_no)
+                            logger.debug(
+                                "Worker %s: checkpoint %d khatiyans for village %s",
+                                worker_id, kh_so_far, vil_name,
+                            )
+
                 hb_task = asyncio.create_task(_heartbeat_loop())
+                cp_task = asyncio.create_task(_checkpoint_loop())
                 try:
-                    # Hard per-village timeout — if the site hangs for >15 min, abort & move on
+                    # Hard per-village timeout — if the site hangs, abort & move on
                     await asyncio.wait_for(
                         self.process_village(
                             village_value=vil_code,
@@ -1785,6 +1798,7 @@ class BhulekhScraper:
                     )
                 finally:
                     hb_task.cancel()
+                    cp_task.cancel()
 
                 kh_done = already_done + self.khatiyans_processed
                 _complete(v_id, kh_done)
