@@ -265,12 +265,12 @@ def main() -> None:
         _err_thread.start()
         logger.info("Error-reset thread started (resets error villages every %ds)", _ERROR_RESET_INTERVAL)
 
-    processes = []
-    for i in range(n_workers):
-        worker_id = f"{hostname}-{os.getpid()}-w{i}"
+    def _make_worker(slot: int) -> multiprocessing.Process:
+        """Spawn a single worker process for the given slot index."""
+        worker_id = f"{hostname}-{os.getpid()}-w{slot}"
         p = multiprocessing.Process(
             target=_worker_main,
-            name=f"VillageWorker-{i}",
+            name=f"VillageWorker-{slot}",
             kwargs=dict(
                 worker_id=worker_id,
                 queue_path=args.db,
@@ -285,11 +285,55 @@ def main() -> None:
             ),
         )
         p.start()
-        processes.append(p)
         logger.info("Started %s (pid=%d)", p.name, p.pid)
+        return p
 
+    # Launch initial workers
+    processes = [_make_worker(i) for i in range(n_workers)]
+
+    # ── Supervisor loop: replace dead workers while work remains ──────────
+    # When a worker exits (e.g. after exhausting site-down backoffs), this
+    # loop immediately spawns a replacement so the pool never shrinks.
+    # The loop exits only when ALL villages are done or errored.
+    _SUPERVISOR_POLL = 30   # seconds between liveness checks
+    while True:
+        time.sleep(_SUPERVISOR_POLL)
+
+        # Check for work remaining
+        try:
+            s = get_stats(args.db)
+            pending  = s["by_status"].get("pending",     {}).get("villages", 0)
+            in_prog  = s["by_status"].get("in_progress", {}).get("villages", 0)
+            no_work  = (pending == 0 and in_prog == 0)
+        except Exception:
+            no_work = False
+
+        if no_work:
+            logger.info("Supervisor: no more pending or in_progress villages — all done.")
+            break
+
+        # Replace any dead workers
+        for i, p in enumerate(processes):
+            if not p.is_alive():
+                logger.warning(
+                    "Supervisor: %s (pid=%d) exited (code=%s) — spawning replacement.",
+                    p.name, p.pid, p.exitcode,
+                )
+                p.join()  # reap the zombie
+                processes[i] = _make_worker(i)
+
+        alive = sum(1 for p in processes if p.is_alive())
+        logger.info("Supervisor: %d/%d workers alive, pending=%s in_progress=%s",
+                    alive, n_workers,
+                    s.get("by_status", {}).get("pending", {}).get("villages", "?"),
+                    s.get("by_status", {}).get("in_progress", {}).get("villages", "?"))
+
+    # Clean shutdown
     for p in processes:
-        p.join()
+        if p.is_alive():
+            p.join(timeout=60)
+            if p.is_alive():
+                p.terminate()
 
     _stop_event.set()  # stop the error-reset thread
     logger.info("All workers finished.")
