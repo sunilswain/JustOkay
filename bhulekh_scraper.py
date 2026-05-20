@@ -1146,6 +1146,7 @@ class BhulekhScraper:
                 # Store data
                 self.data_list.append(ror_data)
                 self.khatiyans_processed += 1
+                self._last_khatiyan_no = khatiyan_value  # track for work-queue checkpoint on timeout
                 total = len(self.data_list)
                 # Persistent storage: append immediately so no data loss on crash
                 if self._current_storage:
@@ -1667,6 +1668,11 @@ class BhulekhScraper:
         def _heartbeat(vid):
             return _queue.heartbeat(vid) if _is_remote else heartbeat(queue_path, vid)
 
+        def _checkpoint(vid, n, last_kh):
+            return (_queue.checkpoint_village(vid, n, last_kh)
+                    if _is_remote
+                    else checkpoint_village(queue_path, vid, n, last_kh))
+
         # ── Initial browser start with retry ──────────────────────────────────
         for _init_attempt in range(5):
             try:
@@ -1722,6 +1728,7 @@ class BhulekhScraper:
             )
 
             village_ok = False
+            self._last_khatiyan_no = None   # reset per-village checkpoint tracker
             try:
                 # Set up persistent storage for this district
                 if self.data_dir:
@@ -1799,6 +1806,20 @@ class BhulekhScraper:
 
             except Exception as e:
                 logger.error("Worker %s: error on village %s: %s", worker_id, vil_name, e)
+
+                # Save partial progress to work queue BEFORE marking failed.
+                # Without this, a village that processed 200 khatiyans then timed out
+                # would show khatiyans_fetched=0 and burn a retry instead of resuming.
+                if self.khatiyans_processed > 0 and self._last_khatiyan_no:
+                    kh_partial = already_done + self.khatiyans_processed
+                    _checkpoint(v_id, kh_partial, self._last_khatiyan_no)
+                    logger.info(
+                        "Worker %s: checkpointed %d khatiyans for village %s before failing",
+                        worker_id, kh_partial, vil_name,
+                    )
+
+                self.khatiyans_processed = 0
+                self._last_khatiyan_no = None
                 _fail(v_id, str(e))
                 # Re-navigate for next village
                 try:
