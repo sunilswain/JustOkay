@@ -607,16 +607,20 @@ if __name__ == "__main__":
 
     elif args.cmd == "priority":
         total = 0
-        if args.districts:
+        if args.tahasils:
+            # --districts is a FILTER only (restrict which district to look in),
+            # not a separate operation. Only the named tahasils get boosted.
+            d_filter = args.districts if args.districts else None
+            n = set_priority_tahasils(db, args.tahasils, args.level, district_codes=d_filter)
+            scope = f" (within districts {args.districts})" if d_filter else ""
+            print(f"Set priority={args.level} for {n} villages in tahasils {args.tahasils}{scope}")
+            total += n
+        elif args.districts:
+            # No --tahasils: boost the entire district(s)
             n = set_priority(db, args.districts, args.level)
             print(f"Set priority={args.level} for {n} villages in districts {args.districts}")
             total += n
-        if args.tahasils:
-            d_filter = args.districts if args.districts else None
-            n = set_priority_tahasils(db, args.tahasils, args.level, district_codes=d_filter)
-            print(f"Set priority={args.level} for {n} villages in tahasils {args.tahasils}")
-            total += n
-        if not args.districts and not args.tahasils:
+        else:
             print("ERROR: provide --districts and/or --tahasils")
             sys.exit(1)
         print(f"Total villages updated: {total}")
