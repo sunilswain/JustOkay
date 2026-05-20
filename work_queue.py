@@ -320,9 +320,13 @@ def fail_village(db_path: str, village_id: int, error_msg: str) -> None:
             return
         retries, max_retries, kh_fetched, last_kh = row
 
-        # If we have a valid resume checkpoint, don't count this as a retry failure.
+        # Timeout errors = site was slow, not a village bug. Always retry, never permanently error.
+        is_timeout = "timed out" in error_msg.lower() or "timeout" in error_msg.lower()
+
+        # Progress checkpoint means the village was partially done — resume, don't count as failure.
         made_progress = (kh_fetched or 0) > 0 and last_kh
-        if made_progress:
+
+        if is_timeout or made_progress:
             con.execute("""
                 UPDATE villages
                 SET    status     = 'pending',
