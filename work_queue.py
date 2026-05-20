@@ -481,7 +481,7 @@ def list_tahasils(db_path: str, district_codes: Optional[list] = None) -> list:
         params = list(district_codes)
     with _conn(db_path) as con:
         return con.execute(f"""
-            SELECT district_name, tahasil_name,
+            SELECT district_code, district_name, tahasil_code, tahasil_name,
                    COUNT(*) AS villages,
                    SUM(CASE WHEN status='done'        THEN 1 ELSE 0 END) AS done,
                    SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) AS in_progress,
@@ -495,6 +495,39 @@ def list_tahasils(db_path: str, district_codes: Optional[list] = None) -> list:
             GROUP BY district_code, tahasil_code
             ORDER BY district_name, priority DESC, tahasil_name
         """, params).fetchall()
+
+
+def set_priority_tahasil_codes(
+    db_path: str,
+    tahasil_codes: list,
+    priority: int,
+    district_codes: Optional[list] = None,
+) -> int:
+    """
+    Boost priority for specific tahasils by their numeric code.
+    Easier to type than Odia names. Use `tahasils` subcommand to find codes.
+    Optionally restrict to certain district codes.
+    Returns the number of villages updated.
+    """
+    if not tahasil_codes:
+        return 0
+    t_placeholders = ",".join("?" * len(tahasil_codes))
+    params: list = [priority] + list(tahasil_codes)
+
+    district_filter = ""
+    if district_codes:
+        d_placeholders = ",".join("?" * len(district_codes))
+        district_filter = f"AND district_code IN ({d_placeholders})"
+        params += list(district_codes)
+
+    with _conn(db_path) as con:
+        cur = con.execute(
+            f"""UPDATE villages SET priority = ?
+                WHERE tahasil_code IN ({t_placeholders})
+                {district_filter}""",
+            params,
+        )
+        return cur.rowcount
 
 
 # ── internal helpers ────────────────────────────────────────────────────────
@@ -543,11 +576,14 @@ if __name__ == "__main__":
                     help="Filter by district code(s), e.g. --districts 3")
 
     pr = sub.add_parser("priority", parents=[_db_parent], add_help=False,
-                        help="Boost priority for district codes or tahasil names")
+                        help="Boost priority for districts / tahasils")
     pr.add_argument("--districts", nargs="+", type=int, default=[],
                     help="District codes to boost (e.g. --districts 3 14)")
     pr.add_argument("--tahasils", nargs="+", default=[],
-                    help="Tahasil names to boost (Odia text)")
+                    help="Tahasil names to boost (Odia text, e.g. --tahasils ବଡ଼ମ୍ବା)")
+    pr.add_argument("--tahasil-codes", nargs="+", type=int, default=[],
+                    help="Tahasil codes to boost — easier than Odia names "
+                         "(see 'Code' column in: work_queue.py tahasils)")
     pr.add_argument("--level", type=int, default=10,
                     help="Priority value (higher = processed first, default: 10)")
 
@@ -586,13 +622,13 @@ if __name__ == "__main__":
             print("No tahasils found (check --districts filter or --db path).")
             sys.exit(0)
 
-        hdr = (f"{'District':<22}  {'Tahasil':<25}  "
+        hdr = (f"{'D':>3}  {'T':>4}  {'District':<18}  {'Tahasil':<22}  "
                f"{'Vil':>5}  {'Done':>5}  {'Active':>6}  {'Pend':>5}  {'Err':>4}  "
                f"{'Fetched':>8}  {'Est.Kh':>8}  {'Vil%':>5}  {'Kh%':>5}  {'Pri':>4}")
         print(hdr)
         print("-" * len(hdr))
         prev_dist = None
-        for dist, t_name, vils, done, active, pend, errors, fetched, est, priority in rows:
+        for d_code, dist, t_code, t_name, vils, done, active, pend, errors, fetched, est, priority in rows:
             if prev_dist and dist != prev_dist:
                 print()
             prev_dist = dist
@@ -600,28 +636,37 @@ if __name__ == "__main__":
             kh_pct  = f"{100*fetched//est}%" if (est and fetched)  else "-"
             pri = str(priority) if priority > 0 else "-"
             print(
-                f"{dist:<22}  {t_name:<25}  "
+                f"{d_code:>3}  {t_code:>4}  {dist:<18}  {t_name:<22}  "
                 f"{vils:>5,}  {done:>5,}  {active:>6,}  {pend:>5,}  {errors:>4,}  "
                 f"{fetched or 0:>8,}  {est or 0:>8,}  {vil_pct:>5}  {kh_pct:>5}  {pri:>4}"
             )
 
     elif args.cmd == "priority":
         total = 0
-        if args.tahasils:
-            # --districts is a FILTER only (restrict which district to look in),
-            # not a separate operation. Only the named tahasils get boosted.
+        tahasil_codes = getattr(args, "tahasil_codes", [])
+
+        if args.tahasils or tahasil_codes:
+            # --districts is a FILTER only, not a separate boost operation.
             d_filter = args.districts if args.districts else None
-            n = set_priority_tahasils(db, args.tahasils, args.level, district_codes=d_filter)
             scope = f" (within districts {args.districts})" if d_filter else ""
-            print(f"Set priority={args.level} for {n} villages in tahasils {args.tahasils}{scope}")
-            total += n
+
+            if args.tahasils:
+                n = set_priority_tahasils(db, args.tahasils, args.level, district_codes=d_filter)
+                print(f"Set priority={args.level} for {n} villages in tahasils {args.tahasils}{scope}")
+                total += n
+
+            if tahasil_codes:
+                n = set_priority_tahasil_codes(db, tahasil_codes, args.level, district_codes=d_filter)
+                print(f"Set priority={args.level} for {n} villages in tahasil codes {tahasil_codes}{scope}")
+                total += n
+
         elif args.districts:
-            # No --tahasils: boost the entire district(s)
+            # No tahasil filter: boost the entire district(s)
             n = set_priority(db, args.districts, args.level)
             print(f"Set priority={args.level} for {n} villages in districts {args.districts}")
             total += n
         else:
-            print("ERROR: provide --districts and/or --tahasils")
+            print("ERROR: provide --districts, --tahasils, and/or --tahasil-codes")
             sys.exit(1)
         print(f"Total villages updated: {total}")
 
