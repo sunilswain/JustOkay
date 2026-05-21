@@ -32,6 +32,26 @@ except ImportError:
     print("ERROR: openpyxl is required. Install with: pip install openpyxl")
     sys.exit(1)
 
+import re
+
+# Regex to match illegal XML characters that Excel can't handle
+ILLEGAL_CHARS_RE = re.compile(
+    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]'
+)
+
+
+def clean_for_excel(value: Any) -> Any:
+    """Remove illegal characters that Excel/openpyxl can't handle."""
+    if isinstance(value, str):
+        # Remove illegal XML characters
+        value = ILLEGAL_CHARS_RE.sub('', value)
+        # Also remove any null bytes
+        value = value.replace('\x00', '')
+        # Truncate very long strings (Excel cell limit is 32767 chars)
+        if len(value) > 32000:
+            value = value[:32000] + "..."
+    return value
+
 
 def sanitize_filename(name: str) -> str:
     """Make a string safe for use as filename."""
@@ -131,19 +151,19 @@ def create_village_excel(
     for kh in khatiyans:
         plots = kh.get('plots', [])
         row = [
-            kh.get('khatiyan_text', ''),
-            kh.get('mouja', ''),
-            kh.get('tehsil', ''),
-            kh.get('district', ''),
-            kh.get('thana', ''),
-            kh.get('landlord_name', ''),
-            kh.get('tenant_name', ''),
-            kh.get('status', ''),
-            kh.get('tax', ''),
-            kh.get('water_tax', ''),
-            kh.get('total', ''),
+            clean_for_excel(kh.get('khatiyan_text', '')),
+            clean_for_excel(kh.get('mouja', '')),
+            clean_for_excel(kh.get('tehsil', '')),
+            clean_for_excel(kh.get('district', '')),
+            clean_for_excel(kh.get('thana', '')),
+            clean_for_excel(kh.get('landlord_name', '')),
+            clean_for_excel(kh.get('tenant_name', '')),
+            clean_for_excel(kh.get('status', '')),
+            clean_for_excel(kh.get('tax', '')),
+            clean_for_excel(kh.get('water_tax', '')),
+            clean_for_excel(kh.get('total', '')),
             len(plots),
-            kh.get('ror_type', ''),
+            clean_for_excel(kh.get('ror_type', '')),
         ]
         ws_summary.append(row)
     
@@ -170,23 +190,23 @@ def create_village_excel(
     
     total_plots = 0
     for kh in khatiyans:
-        kh_no = kh.get('khatiyan_text', '')
+        kh_no = clean_for_excel(kh.get('khatiyan_text', ''))
         plots = kh.get('plots', [])
         for plot in plots:
             row = [
                 kh_no,
-                plot.get('plot_no', ''),
-                plot.get('chaka', ''),
-                plot.get('land_type', ''),
-                plot.get('kisam', ''),
-                plot.get('n_occu', ''),
-                plot.get('e_occu', ''),
-                plot.get('s_occu', ''),
-                plot.get('w_occu', ''),
-                plot.get('acre', ''),
-                plot.get('decimil', ''),
-                plot.get('hector', ''),
-                plot.get('remarks', ''),
+                clean_for_excel(plot.get('plot_no', '')),
+                clean_for_excel(plot.get('chaka', '')),
+                clean_for_excel(plot.get('land_type', '')),
+                clean_for_excel(plot.get('kisam', '')),
+                clean_for_excel(plot.get('n_occu', '')),
+                clean_for_excel(plot.get('e_occu', '')),
+                clean_for_excel(plot.get('s_occu', '')),
+                clean_for_excel(plot.get('w_occu', '')),
+                clean_for_excel(plot.get('acre', '')),
+                clean_for_excel(plot.get('decimil', '')),
+                clean_for_excel(plot.get('hector', '')),
+                clean_for_excel(plot.get('remarks', '')),
             ]
             ws_plots.append(row)
             total_plots += 1
