@@ -1007,73 +1007,57 @@ class BhulekhScraper:
         return data
     
     async def extract_back_page_data(self) -> List[Dict]:
-        """Extract plot data from the back page of RoR."""
+        """Extract plot data from the back page of RoR.
+        
+        Uses a single JavaScript evaluation to extract ALL rows at once,
+        avoiding thousands of individual browser round-trips that would
+        cause timeouts on large khatiyans (750+ rows).
+        """
         plots = []
         
         try:
-            # Get all plot rows (excluding header and footer rows)
-            plot_rows = await self.page.locator('#gvRorBack tr').all()
-            
-            for row in plot_rows[2:-1]:  # Skip header rows and footer row
-                try:
-                    plot_data = {}
+            # Single JS call to extract all plot data - MUCH faster than individual locator calls
+            plots = await self.page.evaluate("""
+                () => {
+                    const results = [];
+                    const rows = document.querySelectorAll('#gvRorBack tr');
                     
-                    # Extract plot number and chaka
-                    plot_no_elem = row.locator('a[id*="lblPlotNo"]')
-                    if await plot_no_elem.count() > 0:
-                        plot_data['plot_no'] = await plot_no_elem.inner_text()
-                    else:
-                        continue  # Skip if no plot number (might be header/footer)
-                    
-                    chaka_elem = row.locator('span[id*="lblchaka"]')
-                    if await chaka_elem.count() > 0:
-                        plot_data['chaka'] = await chaka_elem.inner_text()
-                    
-                    # Extract land type
-                    land_type_elem = row.locator('span[id*="lbllType"]')
-                    if await land_type_elem.count() > 0:
-                        plot_data['land_type'] = await land_type_elem.inner_text()
-                    
-                    # Extract kisam and occupation details
-                    kisam_elem = row.locator('span[id*="lblKisama"]')
-                    if await kisam_elem.count() > 0:
-                        plot_data['kisam'] = await kisam_elem.inner_text()
-                    
-                    occu_elems = {
-                        'n_occu': row.locator('span[id*="lbln_occu"]'),
-                        'e_occu': row.locator('span[id*="lble_occu"]'),
-                        's_occu': row.locator('span[id*="lbls_occu"]'),
-                        'w_occu': row.locator('span[id*="lblw_occu"]')
-                    }
-                    
-                    for key, elem in occu_elems.items():
-                        if await elem.count() > 0:
-                            plot_data[key] = await elem.inner_text()
-                    
-                    # Extract area measurements
-                    acre_elem = row.locator('span[id*="lblAcre"]')
-                    if await acre_elem.count() > 0:
-                        plot_data['acre'] = await acre_elem.inner_text()
-                    
-                    decimil_elem = row.locator('span[id*="lblDecimil"]')
-                    if await decimil_elem.count() > 0:
-                        plot_data['decimil'] = await decimil_elem.inner_text()
-                    
-                    hector_elem = row.locator('span[id*="lblHector"]')
-                    if await hector_elem.count() > 0:
-                        plot_data['hector'] = await hector_elem.inner_text()
-                    
-                    # Extract remarks
-                    remarks_elem = row.locator('span[id*="lblPlotRemarks"]')
-                    if await remarks_elem.count() > 0:
-                        plot_data['remarks'] = await remarks_elem.inner_text()
-                    
-                    if plot_data:
-                        plots.append(plot_data)
+                    // Skip first 2 header rows and last footer row
+                    for (let i = 2; i < rows.length - 1; i++) {
+                        const row = rows[i];
+                        const plot_data = {};
                         
-                except Exception as e:
-                    logger.warning(f"Error extracting plot data from row: {e}")
-                    continue
+                        // Plot number (required - skip row if missing)
+                        const plotNo = row.querySelector('a[id*="lblPlotNo"]');
+                        if (!plotNo || !plotNo.innerText.trim()) continue;
+                        plot_data.plot_no = plotNo.innerText.trim();
+                        
+                        // Helper to get text from selector
+                        const getText = (sel) => {
+                            const el = row.querySelector(sel);
+                            return el ? el.innerText.trim() : '';
+                        };
+                        
+                        // Extract all fields
+                        plot_data.chaka = getText('span[id*="lblchaka"]');
+                        plot_data.land_type = getText('span[id*="lbllType"]');
+                        plot_data.kisam = getText('span[id*="lblKisama"]');
+                        plot_data.n_occu = getText('span[id*="lbln_occu"]');
+                        plot_data.e_occu = getText('span[id*="lble_occu"]');
+                        plot_data.s_occu = getText('span[id*="lbls_occu"]');
+                        plot_data.w_occu = getText('span[id*="lblw_occu"]');
+                        plot_data.acre = getText('span[id*="lblAcre"]');
+                        plot_data.decimil = getText('span[id*="lblDecimil"]');
+                        plot_data.hector = getText('span[id*="lblHector"]');
+                        plot_data.remarks = getText('span[id*="lblPlotRemarks"]');
+                        
+                        results.push(plot_data);
+                    }
+                    return results;
+                }
+            """)
+            
+            logger.info(f"Extracted {len(plots)} plots via JS bulk extraction")
                     
         except Exception as e:
             logger.error(f"Error extracting back page data: {e}")
@@ -1181,10 +1165,10 @@ class BhulekhScraper:
                 try:
                     ror_data = await asyncio.wait_for(
                         self.extract_ror_data(),
-                        timeout=300.0  # 5 minute timeout for extraction (handles 750+ row khatiyans)
+                        timeout=600.0  # 10 minute timeout (JS bulk extraction is fast, but safety margin)
                     )
                 except asyncio.TimeoutError:
-                    logger.error(f"EXTRACTION TIMEOUT: Khatiyan {khatiyan_text} took >5min to extract")
+                    logger.error(f"EXTRACTION TIMEOUT: Khatiyan {khatiyan_text} took >10min to extract")
                     raise Exception(f"Data extraction timed out for Khatiyan {khatiyan_text}")
                 extract_elapsed = time.time() - extract_start
                 logger.info(f"Extraction completed for Khatiyan {khatiyan_text} in {extract_elapsed:.1f}s")
