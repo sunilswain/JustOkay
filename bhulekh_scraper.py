@@ -941,16 +941,60 @@ class BhulekhScraper:
         if back_plots:
             data['plots'] = back_plots
         else:
-            # Try alternative back table selectors
-            for back_sel in ['#gvRorBack2', '#gvRorFrontBack', '#gvplotdetail',
-                             '[id*="gvRor"] tr', '[id*="gvPlot"] tr']:
+            # Try alternative back table selectors with actual extraction
+            alt_table_ids = ['gvRorBack2', 'gvRorFrontBack', 'gvplotdetail', 'gvRorBack']
+            for table_id in alt_table_ids:
                 try:
-                    rows = await self.page.locator(back_sel).all()
-                    if rows:
-                        logger.info(f"Type-2 back table found via {back_sel}: {len(rows)} rows")
+                    alt_plots = await self.page.evaluate(f"""
+                        () => {{
+                            const results = [];
+                            const table = document.getElementById('{table_id}');
+                            if (!table) return results;
+                            const rows = table.querySelectorAll('tr');
+                            
+                            for (let i = 1; i < rows.length; i++) {{
+                                const row = rows[i];
+                                const cells = row.querySelectorAll('td');
+                                if (cells.length < 3) continue;
+                                
+                                const plot_data = {{}};
+                                
+                                // Try to find plot number
+                                const plotLink = row.querySelector('a[id*="lblPlotNo"], a[id*="Plot"]');
+                                const plotSpan = row.querySelector('span[id*="lblPlotNo"], span[id*="Plot"]');
+                                const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim() || cells[0]?.innerText?.trim();
+                                if (!plotNo || plotNo === '') continue;
+                                
+                                plot_data.plot_no = plotNo;
+                                
+                                // Extract other fields by looking for spans with known IDs
+                                const getText = (patterns) => {{
+                                    for (const p of patterns) {{
+                                        const el = row.querySelector(p);
+                                        if (el && el.innerText.trim()) return el.innerText.trim();
+                                    }}
+                                    return '';
+                                }};
+                                
+                                plot_data.chaka = getText(['span[id*="lblchaka"]', 'span[id*="Chaka"]']);
+                                plot_data.land_type = getText(['span[id*="lbllType"]', 'span[id*="LandType"]', 'span[id*="lType"]']);
+                                plot_data.kisam = getText(['span[id*="lblKisama"]', 'span[id*="Kisam"]']);
+                                plot_data.acre = getText(['span[id*="lblAcre"]', 'span[id*="Acre"]']);
+                                plot_data.decimil = getText(['span[id*="lblDecimil"]', 'span[id*="Decimil"]']);
+                                plot_data.hector = getText(['span[id*="lblHector"]', 'span[id*="Hector"]']);
+                                plot_data.remarks = getText(['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]']);
+                                
+                                results.push(plot_data);
+                            }}
+                            return results;
+                        }}
+                    """)
+                    if alt_plots and len(alt_plots) > 0:
+                        logger.info(f"Type-2: Extracted {len(alt_plots)} plots from {table_id}")
+                        data['plots'] = alt_plots
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Type-2 alt table {table_id} failed: {e}")
 
         # Log what we captured
         filled = sum(1 for v in data.values() if v and v != [] and v != 'type2')
@@ -1012,44 +1056,86 @@ class BhulekhScraper:
         Uses a single JavaScript evaluation to extract ALL rows at once,
         avoiding thousands of individual browser round-trips that would
         cause timeouts on large khatiyans (750+ rows).
+        
+        Tries multiple table IDs to handle different page layouts.
         """
         plots = []
         
         try:
-            # Single JS call to extract all plot data - MUCH faster than individual locator calls
+            # Try multiple table selectors - different pages use different IDs
             plots = await self.page.evaluate("""
                 () => {
                     const results = [];
-                    const rows = document.querySelectorAll('#gvRorBack tr');
                     
-                    // Skip first 2 header rows and last footer row
-                    for (let i = 2; i < rows.length - 1; i++) {
+                    // Try multiple table IDs
+                    const tableIds = ['gvRorBack', 'gvRorBack2', 'gvRorFrontBack', 'gvplotdetail'];
+                    let rows = null;
+                    let tableFound = '';
+                    
+                    for (const tableId of tableIds) {
+                        const table = document.getElementById(tableId);
+                        if (table) {
+                            rows = table.querySelectorAll('tr');
+                            if (rows && rows.length > 2) {
+                                tableFound = tableId;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Fallback: try any table with plot-like content
+                    if (!rows || rows.length <= 2) {
+                        const allTables = document.querySelectorAll('table[id*="gv"], table[id*="Ror"], table[id*="plot"]');
+                        for (const table of allTables) {
+                            const trs = table.querySelectorAll('tr');
+                            if (trs.length > 2) {
+                                rows = trs;
+                                tableFound = table.id || 'fallback-table';
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!rows) return results;
+                    
+                    // Skip header rows (usually first 1-2 rows)
+                    const startIdx = rows.length > 3 ? 2 : 1;
+                    const endIdx = rows.length > 3 ? rows.length - 1 : rows.length;
+                    
+                    for (let i = startIdx; i < endIdx; i++) {
                         const row = rows[i];
                         const plot_data = {};
                         
-                        // Plot number (required - skip row if missing)
-                        const plotNo = row.querySelector('a[id*="lblPlotNo"]');
-                        if (!plotNo || !plotNo.innerText.trim()) continue;
-                        plot_data.plot_no = plotNo.innerText.trim();
+                        // Plot number - try multiple patterns
+                        const plotLink = row.querySelector('a[id*="lblPlotNo"], a[id*="Plot"]');
+                        const plotSpan = row.querySelector('span[id*="lblPlotNo"], span[id*="Plot"]');
+                        const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim();
                         
-                        // Helper to get text from selector
-                        const getText = (sel) => {
-                            const el = row.querySelector(sel);
-                            return el ? el.innerText.trim() : '';
+                        if (!plotNo) continue;
+                        plot_data.plot_no = plotNo;
+                        
+                        // Helper to get text from multiple selector patterns
+                        const getText = (patterns) => {
+                            if (typeof patterns === 'string') patterns = [patterns];
+                            for (const sel of patterns) {
+                                const el = row.querySelector(sel);
+                                if (el && el.innerText.trim()) return el.innerText.trim();
+                            }
+                            return '';
                         };
                         
-                        // Extract all fields
-                        plot_data.chaka = getText('span[id*="lblchaka"]');
-                        plot_data.land_type = getText('span[id*="lbllType"]');
-                        plot_data.kisam = getText('span[id*="lblKisama"]');
-                        plot_data.n_occu = getText('span[id*="lbln_occu"]');
-                        plot_data.e_occu = getText('span[id*="lble_occu"]');
-                        plot_data.s_occu = getText('span[id*="lbls_occu"]');
-                        plot_data.w_occu = getText('span[id*="lblw_occu"]');
-                        plot_data.acre = getText('span[id*="lblAcre"]');
-                        plot_data.decimil = getText('span[id*="lblDecimil"]');
-                        plot_data.hector = getText('span[id*="lblHector"]');
-                        plot_data.remarks = getText('span[id*="lblPlotRemarks"]');
+                        // Extract all fields with fallback patterns
+                        plot_data.chaka = getText(['span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="chaka"]']);
+                        plot_data.land_type = getText(['span[id*="lbllType"]', 'span[id*="LandType"]', '[id*="lType"]']);
+                        plot_data.kisam = getText(['span[id*="lblKisama"]', 'span[id*="Kisam"]', '[id*="Kisam"]']);
+                        plot_data.n_occu = getText(['span[id*="lbln_occu"]', '[id*="n_occu"]']);
+                        plot_data.e_occu = getText(['span[id*="lble_occu"]', '[id*="e_occu"]']);
+                        plot_data.s_occu = getText(['span[id*="lbls_occu"]', '[id*="s_occu"]']);
+                        plot_data.w_occu = getText(['span[id*="lblw_occu"]', '[id*="w_occu"]']);
+                        plot_data.acre = getText(['span[id*="lblAcre"]', 'span[id*="Acre"]', '[id*="Acre"]']);
+                        plot_data.decimil = getText(['span[id*="lblDecimil"]', 'span[id*="Decimil"]', '[id*="Decimil"]']);
+                        plot_data.hector = getText(['span[id*="lblHector"]', 'span[id*="Hector"]', '[id*="Hector"]']);
+                        plot_data.remarks = getText(['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]', '[id*="Remark"]']);
                         
                         results.push(plot_data);
                     }
