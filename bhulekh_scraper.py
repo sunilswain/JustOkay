@@ -1143,7 +1143,24 @@ class BhulekhScraper:
                 }
             """)
             
-            logger.info(f"Extracted {len(plots)} plots via JS bulk extraction")
+            if plots:
+                logger.info(f"Extracted {len(plots)} plots via JS bulk extraction")
+            else:
+                # Log debug info about what tables exist on the page
+                try:
+                    table_info = await self.page.evaluate("""
+                        () => {
+                            const tables = document.querySelectorAll('table');
+                            return Array.from(tables).map(t => ({
+                                id: t.id || '(no id)',
+                                rows: t.querySelectorAll('tr').length,
+                                hasPlotLink: t.querySelector('a[id*="Plot"], span[id*="Plot"]') !== null
+                            })).filter(t => t.rows > 1);
+                        }
+                    """)
+                    logger.warning(f"No plots extracted. Tables on page: {table_info[:5]}")  # First 5 tables
+                except:
+                    logger.warning("No plots extracted and couldn't inspect page tables")
                     
         except Exception as e:
             logger.error(f"Error extracting back page data: {e}")
@@ -1244,6 +1261,16 @@ class BhulekhScraper:
                 except Exception:
                     pass  # continue and try extract anyway
                 await self.human_delay(0.1, 0.25)
+                
+                # Scroll to bottom to trigger lazy loading of back table (plot data)
+                # This ensures gvRorBack is loaded even if it's below the fold
+                try:
+                    await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await self.human_delay(0.3, 0.5)
+                    # Try to wait for back table specifically
+                    await self.page.wait_for_selector("#gvRorBack, #gvRorBack2, #gvplotdetail, table[id*='RorBack']", state="visible", timeout=5000)
+                except Exception:
+                    pass  # Back table might not exist for this record, continue anyway
 
                 # Extract data (with timeout protection for large khatiyans)
                 logger.info(f"Starting extraction for Khatiyan {khatiyan_text}...")
