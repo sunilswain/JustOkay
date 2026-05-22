@@ -1,5 +1,5 @@
 [Unit]
-Description=Bhulekh Village Scraper (Instance 2 - Jajpur priority)
+Description=Bhulekh Village Scraper - Instance 2
 After=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=10
@@ -16,7 +16,7 @@ ExecStart=/home/ubuntu/.local/bin/uv run python run_village_workers.py \
     --headless \
     --fast \
     --priority-districts 18 --priority-level 100 \
-    --districts 16 17 18 19 20 21 22 24 25 26 27 28 29 30
+    --districts 1 2 4 5 6 7 8 11 12 13 14 15 17 22 25 28 29
 Restart=always
 RestartSec=30
 StandardOutput=journal
