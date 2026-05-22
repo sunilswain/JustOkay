@@ -72,11 +72,11 @@ def update_queue_status(queue_db: Path, completed_villages: dict) -> tuple:
             matched += 1
             vid, status, current_fetched = row
             
-            # Update if not already completed or if we have more khatiyans
-            if status != 'completed' or (current_fetched or 0) < khatiyan_count:
+            # Update if not already done or if we have more khatiyans
+            if status != 'done' or (current_fetched or 0) < khatiyan_count:
                 cursor.execute("""
                     UPDATE villages 
-                    SET status = 'completed', 
+                    SET status = 'done', 
                         khatiyans_fetched = ?,
                         completed_at = datetime('now')
                     WHERE id = ?
