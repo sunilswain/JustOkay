@@ -340,8 +340,8 @@ async def run_verification(
     
     # Initialize scraper
     from bhulekh_scraper import BhulekhScraper
-    scraper = BhulekhScraper(headless=headless)
-    await scraper.initialize()
+    scraper = BhulekhScraper()
+    await scraper.init_browser(headless=headless)
     await scraper.navigate_to_ror_page()
     
     # Verify each sample
