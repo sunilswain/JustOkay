@@ -352,15 +352,17 @@ async def run_verification(
         results.append(result)
         
         # Log summary
-        if result['success']:
-            comp = result.get('comparison', {})
+        if result and result.get('success'):
+            comp = result.get('comparison') or {}
             discrepancies = comp.get('discrepancies', [])
             if discrepancies:
                 logger.warning(f"  DISCREPANCIES FOUND: {discrepancies}")
             else:
-                logger.info(f"  OK - Stored plots: {comp.get('stored_fields', {}).get('plots_count', '?')}, Page estimate: {comp.get('page_plot_count_estimate', '?')}")
+                stored = (comp.get('stored_fields') or {}).get('plots_count', '?')
+                page_est = comp.get('page_plot_count_estimate', '?')
+                logger.info(f"  OK - Stored plots: {stored}, Page estimate: {page_est}")
         else:
-            logger.error(f"  FAILED: {result.get('error', 'Unknown error')}")
+            logger.error(f"  FAILED: {result.get('error', 'Unknown error') if result else 'No result'}")
     
     await scraper.cleanup()
     
@@ -368,9 +370,9 @@ async def run_verification(
     report = {
         'timestamp': datetime.now().isoformat(),
         'samples_checked': len(results),
-        'successful': sum(1 for r in results if r['success']),
-        'failed': sum(1 for r in results if not r['success']),
-        'with_discrepancies': sum(1 for r in results if r.get('comparison', {}).get('discrepancies')),
+        'successful': sum(1 for r in results if r and r.get('success')),
+        'failed': sum(1 for r in results if r and not r.get('success')),
+        'with_discrepancies': sum(1 for r in results if r and (r.get('comparison') or {}).get('discrepancies')),
         'results': results,
     }
     
@@ -392,17 +394,23 @@ async def run_verification(
     if report['with_discrepancies'] > 0:
         print("\nDISCREPANCIES FOUND:")
         for result in results:
-            if result.get('comparison', {}).get('discrepancies'):
-                kh = result['khatiyan']
-                print(f"\n  {kh['district']}/{kh['tahasil']}/{kh['village']}/Khatiyan {kh['khatiyan_text']}:")
-                for d in result['comparison']['discrepancies']:
+            if not result:
+                continue
+            comp = result.get('comparison') or {}
+            if comp.get('discrepancies'):
+                kh = result.get('khatiyan', {})
+                print(f"\n  {kh.get('district', '?')}/{kh.get('tahasil', '?')}/{kh.get('village', '?')}/Khatiyan {kh.get('khatiyan_text', '?')}:")
+                for d in comp['discrepancies']:
                     print(f"    - {d}")
     
     # List all unique table IDs found
     all_tables = set()
     for result in results:
-        if result.get('html_analysis', {}).get('tables'):
-            all_tables.update(result['html_analysis']['tables'])
+        if not result:
+            continue
+        html_analysis = result.get('html_analysis') or {}
+        if html_analysis.get('tables'):
+            all_tables.update(html_analysis['tables'])
     
     if all_tables:
         print(f"\nTable IDs found across all pages: {sorted(all_tables)}")
