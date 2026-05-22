@@ -1307,12 +1307,8 @@ class BhulekhScraper:
                 # Log loading status for debugging
                 logger.debug(f"Page load status: front={front_loaded}, back_table={back_table_found}")
 
-                # Capture HTML for re-extraction capability
+                # HTML will be captured only if extraction has issues (to avoid DB bloat)
                 html_content = None
-                try:
-                    html_content = await self.page.content()
-                except Exception as html_err:
-                    logger.warning(f"Failed to capture HTML: {html_err}")
                 
                 # Extract data (with timeout protection for large khatiyans)
                 logger.info(f"Starting extraction for Khatiyan {khatiyan_text}...")
@@ -1340,6 +1336,33 @@ class BhulekhScraper:
                 # Warn if almost nothing was extracted (page might not have loaded properly)
                 if filled_fields < 3 and plots_count == 0:
                     logger.warning(f"⚠️ SPARSE DATA: Only {filled_fields} fields extracted for Khatiyan {khatiyan_text}")
+                
+                # Only capture HTML if extraction has issues (to avoid DB bloat)
+                # Issues: no plots, or plots missing critical fields
+                has_issues = False
+                if plots_count == 0:
+                    has_issues = True
+                else:
+                    for plot in ror_data.get('plots', []):
+                        # Check for missing plot number
+                        if not plot.get('plot_no', '').strip():
+                            has_issues = True
+                            break
+                        # Check for empty area (but skip "no plots" messages)
+                        acre = plot.get('acre', '').strip()
+                        decimil = plot.get('decimil', '').strip()
+                        hector = plot.get('hector', '').strip()
+                        kisam = plot.get('kisam', '')
+                        if not acre and not decimil and not hector and 'ଉପଲବ୍ଧ ନାହିଁ' not in kisam:
+                            has_issues = True
+                            break
+                
+                if has_issues:
+                    try:
+                        html_content = await self.page.content()
+                        logger.info(f"Captured HTML for review: Khatiyan {khatiyan_text} (extraction issues detected)")
+                    except Exception as html_err:
+                        logger.warning(f"Failed to capture HTML: {html_err}")
                 
                 # Add metadata
                 ror_data['district'] = district

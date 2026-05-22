@@ -253,7 +253,7 @@ class BhulekhStorage(BhulekhStorageBase):
         
         Args:
             ror_data: Extracted RoR data dictionary
-            html_content: Raw HTML of the RoR page (for re-extraction if needed)
+            html_content: Raw HTML of the RoR page (only stored when extraction has issues)
         """
         conn = self._conn()
         district = ror_data.get("district", "")
@@ -263,8 +263,8 @@ class BhulekhStorage(BhulekhStorageBase):
         khatiyan_text = ror_data.get("khatiyan_text", "")
         data_json = json.dumps(ror_data, ensure_ascii=False)
         
-        # Flag records that may need review (empty plots or missing critical fields)
-        needs_review = self._check_needs_review(ror_data)
+        # needs_review is 1 if HTML was captured (means extraction had issues)
+        needs_review = 1 if html_content else 0
         
         conn.execute(
             """INSERT INTO khatiyans (district, tahasil, village, khatiyan_value, khatiyan_text, data_json, html_content, needs_review)
@@ -273,30 +273,6 @@ class BhulekhStorage(BhulekhStorageBase):
         )
         conn.commit()
     
-    def _check_needs_review(self, ror_data: Dict[str, Any]) -> int:
-        """Check if record might have extraction issues and needs review."""
-        plots = ror_data.get("plots", [])
-        
-        # No plots at all
-        if not plots:
-            return 1
-        
-        # Check each plot for missing critical fields
-        for plot in plots:
-            # Missing plot number
-            if not plot.get("plot_no", "").strip():
-                return 1
-            # All area fields empty (acre, decimil, hector)
-            acre = plot.get("acre", "").strip()
-            decimil = plot.get("decimil", "").strip()
-            hector = plot.get("hector", "").strip()
-            if not acre and not decimil and not hector:
-                # Check if this is a "no plots" message
-                kisam = plot.get("kisam", "")
-                if "ଉପଲବ୍ଧ ନାହିଁ" not in kisam:  # "not available" in Odia
-                    return 1
-        
-        return 0
 
     def set_checkpoint(
         self,
