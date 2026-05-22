@@ -49,10 +49,13 @@ browser_data/
 
 # Scraped data (large; transfer separately)
 bhulekh_data/
-*.db
 *.ndjson
 
-# work_queue.db is tracked (small, needed on all machines)
+# Database files - NEVER track these (runtime data, different per machine)
+*.db
+*.db-shm
+*.db-wal
+# work_queue.db must NOT be tracked - each instance has its own queue state
 
 # Exports / verification
 bhulekh_all.csv
