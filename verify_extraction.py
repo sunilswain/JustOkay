@@ -186,11 +186,29 @@ async def capture_and_verify_khatiyan(
         logger.info(f"Verifying: {district}/{tahasil}/{village}/Khatiyan {kh_text}")
         
         # Navigate to the khatiyan
+        # Wait for page to be ready
+        await scraper.human_delay(0.5, 1.0)
+        
         # Select district
         district_opts = await scraper.get_dropdown_options(SELECTOR_DISTRICT)
+        if not district_opts:
+            # Try waiting and fetching again
+            await scraper.human_delay(1.0, 1.5)
+            district_opts = await scraper.get_dropdown_options(SELECTOR_DISTRICT)
+        
+        logger.debug(f"Available districts: {[o['text'] for o in district_opts[:5]]}...")
+        
+        # Try exact match first, then partial match
         district_match = next((o for o in district_opts if o['text'] == district), None)
         if not district_match:
-            result['error'] = f"District not found: {district}"
+            # Try stripping whitespace
+            district_match = next((o for o in district_opts if o['text'].strip() == district.strip()), None)
+        if not district_match:
+            # Try partial match
+            district_match = next((o for o in district_opts if district in o['text'] or o['text'] in district), None)
+        
+        if not district_match:
+            result['error'] = f"District not found: {district}. Available: {[o['text'] for o in district_opts[:10]]}"
             return result
         await scraper.select_dropdown(SELECTOR_DISTRICT, district_match['value'])
         await scraper.human_delay(0.5, 0.8)
