@@ -20,13 +20,15 @@ from typing import Dict, List, Set, Tuple
 
 def scan_district_db(db_path: Path) -> Dict[str, Dict[str, List[str]]]:
     """
-    Scan a district database and find khatiyans with empty plots.
+    Scan a district database and find khatiyans with extraction issues:
+    1. Empty plots array (0 plots)
+    2. Plots with all area fields empty (acre, decimil, hector)
     
-    Returns: {tahasil: {village: [list of empty khatiyan_texts]}}
+    Returns: {tahasil: {village: [list of problem khatiyan_texts]}}
     """
-    empty_by_village = defaultdict(lambda: defaultdict(list))
+    problem_by_village = defaultdict(lambda: defaultdict(list))
     total_khatiyans = 0
-    empty_khatiyans = 0
+    problem_khatiyans = 0
     
     try:
         conn = sqlite3.connect(str(db_path))
@@ -36,21 +38,44 @@ def scan_district_db(db_path: Path) -> Dict[str, Dict[str, List[str]]]:
         
         for tahasil, village, kh_text, data_json in cursor:
             total_khatiyans += 1
+            has_problem = False
+            
             try:
                 data = json.loads(data_json)
                 plots = data.get('plots', [])
+                
+                # Issue 1: No plots at all
                 if not plots or len(plots) == 0:
-                    empty_khatiyans += 1
-                    empty_by_village[tahasil][village].append(kh_text)
+                    has_problem = True
+                else:
+                    # Issue 2: Check each plot for empty area fields
+                    for plot in plots:
+                        acre = plot.get('acre', '').strip()
+                        decimil = plot.get('decimil', '').strip()
+                        hector = plot.get('hector', '').strip()
+                        kisam = plot.get('kisam', '')
+                        
+                        # Skip "not available" messages - those are legitimate
+                        if 'ଉପଲବ୍ଧ ନାହିଁ' in kisam:
+                            continue
+                        
+                        # All area fields empty = problem
+                        if not acre and not decimil and not hector:
+                            has_problem = True
+                            break
+                            
             except json.JSONDecodeError:
-                empty_khatiyans += 1
-                empty_by_village[tahasil][village].append(kh_text)
+                has_problem = True
+            
+            if has_problem:
+                problem_khatiyans += 1
+                problem_by_village[tahasil][village].append(kh_text)
         
         conn.close()
     except Exception as e:
         print(f"  Error reading {db_path}: {e}")
     
-    return dict(empty_by_village), total_khatiyans, empty_khatiyans
+    return dict(problem_by_village), total_khatiyans, problem_khatiyans
 
 
 def get_district_name_from_db(db_path: Path) -> str:
@@ -185,7 +210,8 @@ def main():
             print(f"{district}: {total} khatiyans, all have plots ✓")
     
     print(f"\n{'='*60}")
-    print(f"SUMMARY: {grand_empty}/{grand_total} khatiyans ({100*grand_empty/grand_total:.1f}%) have empty plots")
+    print(f"SUMMARY: {grand_empty}/{grand_total} khatiyans ({100*grand_empty/grand_total:.1f}%) need re-scraping")
+    print(f"  (empty plots OR plots with missing area data)")
     print(f"{'='*60}")
     
     if not all_affected:
