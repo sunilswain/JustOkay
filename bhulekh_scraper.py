@@ -1098,25 +1098,25 @@ class BhulekhScraper:
                     
                     if (!rows) return results;
                     
-                    // Skip header rows (usually first 1-2 rows)
-                    const startIdx = rows.length > 3 ? 2 : 1;
-                    const endIdx = rows.length > 3 ? rows.length - 1 : rows.length;
-                    
-                    for (let i = startIdx; i < endIdx; i++) {
+                    // Iterate through ALL rows and check each for plot data
+                    // This handles variable header row counts
+                    for (let i = 0; i < rows.length; i++) {
                         const row = rows[i];
                         const plot_data = {};
                         
-                        // Plot number - try multiple patterns (lblPlotcni has the actual number)
-                        const plotLink = row.querySelector('a[id*="lblPlotcni"], a[id*="lblPlotNo"], a[id*="Plot"]');
-                        const plotSpan = row.querySelector('span[id*="lblPlotcni"], span[id*="lblPlotNo"], span[id*="Plot"]');
-                        // Also try first cell or any link/span in row
-                        const cells = row.querySelectorAll('td');
-                        const firstCellText = cells[0]?.innerText?.trim();
-                        const anyLink = row.querySelector('a')?.innerText?.trim();
+                        // Look for plot number elements with specific IDs
+                        const plotLink = row.querySelector('a[id*="lblPlotcni"], a[id*="lblPlotNo"]');
+                        const plotSpan = row.querySelector('span[id*="lblPlotcni"], span[id*="lblPlotNo"]');
                         
-                        const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim() || firstCellText || anyLink;
+                        // Get plot number from specific elements
+                        let plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim();
                         
+                        // Skip if no valid plot number found (header rows won't have these elements)
                         if (!plotNo) continue;
+                        
+                        // Validate it looks like a plot number (should have digits)
+                        if (!/\d/.test(plotNo)) continue;
+                        
                         plot_data.plot_no = plotNo;
                         
                         // Helper to get text from multiple selector patterns
