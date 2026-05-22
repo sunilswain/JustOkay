@@ -1,72 +1,48 @@
 #!/bin/bash
-# Safe SQLite backup to S3
-# This script properly checkpoints WAL before copying to avoid corruption
+# Proper SQLite backup to S3
+# SQLite WAL mode requires checkpointing before backup
 
 set -e
 
-S3_BUCKET="${S3_BUCKET:-bhulekh-backup}"
-BACKUP_DIR="backup_$(date +%Y%m%d_%H%M%S)"
-LOCAL_BACKUP="/tmp/$BACKUP_DIR"
+BUCKET="${S3_BUCKET:-bhulekh-backup}"
+DATA_DIR="${DATA_DIR:-bhulekh_data}"
+QUEUE_DB="${QUEUE_DB:-work_queue.db}"
+BACKUP_DIR="/tmp/bhulekh_backup_$$"
 
-echo "=== Bhulekh Safe Backup to S3 ==="
-echo "Timestamp: $(date)"
-echo "S3 Bucket: $S3_BUCKET"
+echo "=== Bhulekh S3 Backup ==="
+echo "Bucket: s3://$BUCKET"
+echo "Time: $(date)"
 
-mkdir -p "$LOCAL_BACKUP"
+mkdir -p "$BACKUP_DIR"
 
-# Function to safely backup a SQLite database
-backup_sqlite_db() {
-    local db_path="$1"
-    local db_name=$(basename "$db_path")
-    
-    if [ ! -f "$db_path" ]; then
-        echo "  Skipping $db_name (not found)"
-        return
-    fi
-    
-    echo "  Backing up $db_name..."
-    
-    # Method 1: Use SQLite's built-in backup (safest)
-    sqlite3 "$db_path" ".backup '$LOCAL_BACKUP/$db_name'"
-    
-    # Verify the backup
-    if sqlite3 "$LOCAL_BACKUP/$db_name" "PRAGMA integrity_check;" | grep -q "ok"; then
-        echo "    ✓ Backup verified: $db_name"
-    else
-        echo "    ✗ WARNING: Backup may be corrupted: $db_name"
-    fi
-}
+# Backup work_queue.db with proper SQLite handling
+if [ -f "$QUEUE_DB" ]; then
+    echo "Backing up $QUEUE_DB..."
+    # Checkpoint WAL to ensure all data is in main file
+    sqlite3 "$QUEUE_DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+    # Use SQLite's backup command for safe copy
+    sqlite3 "$QUEUE_DB" ".backup '$BACKUP_DIR/work_queue.db'"
+    aws s3 cp "$BACKUP_DIR/work_queue.db" "s3://$BUCKET/work_queue.db"
+    echo "  Uploaded work_queue.db"
+fi
 
-# Backup work_queue.db
-echo ""
-echo "Backing up work_queue.db..."
-backup_sqlite_db "work_queue.db"
+# Backup each district database
+if [ -d "$DATA_DIR" ]; then
+    echo "Backing up district databases..."
+    for db in "$DATA_DIR"/*.db; do
+        if [ -f "$db" ]; then
+            name=$(basename "$db")
+            echo "  Processing $name..."
+            # Checkpoint and backup
+            sqlite3 "$db" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+            sqlite3 "$db" ".backup '$BACKUP_DIR/$name'"
+            aws s3 cp "$BACKUP_DIR/$name" "s3://$BUCKET/bhulekh_data/$name"
+        fi
+    done
+fi
 
-# Backup all district databases
-echo ""
-echo "Backing up bhulekh_data/*.db..."
-for db in bhulekh_data/district_*.db; do
-    backup_sqlite_db "$db"
-done
+# Cleanup
+rm -rf "$BACKUP_DIR"
 
-# Upload to S3
-echo ""
-echo "Uploading to S3..."
-aws s3 sync "$LOCAL_BACKUP" "s3://$S3_BUCKET/$BACKUP_DIR/" --quiet
-echo "  Uploaded to s3://$S3_BUCKET/$BACKUP_DIR/"
-
-# Also keep a "latest" copy
-aws s3 sync "$LOCAL_BACKUP" "s3://$S3_BUCKET/latest/" --quiet
-echo "  Updated s3://$S3_BUCKET/latest/"
-
-# Cleanup local backup
-rm -rf "$LOCAL_BACKUP"
-
-echo ""
-echo "=== Backup Complete ==="
-echo "To restore: aws s3 sync s3://$S3_BUCKET/latest/ ./"
-
-# List recent backups
-echo ""
-echo "Recent backups in S3:"
-aws s3 ls "s3://$S3_BUCKET/" | grep backup_ | tail -5
+echo "=== Backup complete ==="
+echo "Time: $(date)"
