@@ -164,6 +164,8 @@ async def capture_and_verify_khatiyan(
     """
     Navigate to a khatiyan, capture HTML/screenshot, and compare with stored data.
     """
+    from bhulekh_scraper import SELECTOR_DISTRICT, SELECTOR_TAHASIL, SELECTOR_VILLAGE, SELECTOR_KHATIYAN
+    
     result = {
         'khatiyan': khatiyan,
         'success': False,
@@ -175,8 +177,6 @@ async def capture_and_verify_khatiyan(
     }
     
     try:
-        from bhulekh_scraper import SELECTOR_DISTRICT, SELECTOR_TAHASIL, SELECTOR_VILLAGE, SELECTOR_KHATIYAN, SELECTOR_VIEW_BTN
-        
         district = khatiyan['district']
         tahasil = khatiyan['tahasil']
         village = khatiyan['village']
@@ -217,8 +217,8 @@ async def capture_and_verify_khatiyan(
         await scraper.select_dropdown(SELECTOR_KHATIYAN, kh_value, label=kh_text)
         await scraper.human_delay(0.3, 0.5)
         
-        # Click View
-        await scraper.page.click(SELECTOR_VIEW_BTN)
+        # Click View RoR button
+        await scraper.click_view_ror()
         await scraper.human_delay(1.0, 1.5)
         
         # Wait for page to load
@@ -362,7 +362,7 @@ async def run_verification(
         else:
             logger.error(f"  FAILED: {result.get('error', 'Unknown error')}")
     
-    await scraper.close()
+    await scraper.cleanup()
     
     # Generate summary report
     report = {

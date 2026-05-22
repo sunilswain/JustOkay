@@ -122,7 +122,7 @@ async def rescrape_single_khatiyan(
     try:
         # Navigate to the khatiyan
         # First select district
-        from bhulekh_scraper import SELECTOR_DISTRICT, SELECTOR_TAHASIL, SELECTOR_VILLAGE, SELECTOR_KHATIYAN, SELECTOR_VIEW_BTN
+        from bhulekh_scraper import SELECTOR_DISTRICT, SELECTOR_TAHASIL, SELECTOR_VILLAGE, SELECTOR_KHATIYAN
         
         # Get district options and find match
         district_opts = await scraper.get_dropdown_options(SELECTOR_DISTRICT)
@@ -173,8 +173,8 @@ async def rescrape_single_khatiyan(
         await scraper.select_dropdown(SELECTOR_KHATIYAN, khatiyan_value, label=khatiyan_text)
         await scraper.human_delay(0.2, 0.4)
         
-        # Click View
-        await scraper.page.click(SELECTOR_VIEW_BTN)
+        # Click View RoR button
+        await scraper.click_view_ror()
         await scraper.human_delay(0.5, 1.0)
         
         # Wait for RoR page and scroll
@@ -318,13 +318,13 @@ async def rescrape_empty_plots(
             
             # Try to recover by restarting browser
             try:
-                await scraper.close()
+                await scraper.cleanup()
                 await scraper.initialize()
                 await scraper.navigate_to_ror_page()
             except:
                 pass
     
-    await scraper.close()
+    await scraper.cleanup()
     
     logger.info(f"\n{'='*60}")
     logger.info(f"RE-SCRAPE COMPLETE")
