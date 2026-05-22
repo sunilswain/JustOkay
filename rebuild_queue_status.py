@@ -64,7 +64,7 @@ def update_queue_status(queue_db: Path, completed_villages: dict) -> tuple:
         cursor.execute("""
             SELECT id, status, khatiyans_fetched 
             FROM villages 
-            WHERE district_text = ? AND tahasil_text = ? AND village_text = ?
+            WHERE district_name = ? AND tahasil_name = ? AND village_name = ?
         """, (district, tahasil, village))
         
         row = cursor.fetchone()
