@@ -1256,21 +1256,50 @@ class BhulekhScraper:
                         raise Exception("Website timeout error persists after all retries")
 
                 # Wait for RoR view content so we don't extract while page is still loading/navigating
+                front_loaded = False
                 try:
-                    await self.page.wait_for_selector("#gvfront_ctl02_lblMouja, #gvfront, #gvRorBack", state="visible", timeout=15000)
-                except Exception:
-                    pass  # continue and try extract anyway
+                    await self.page.wait_for_selector("#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack", state="visible", timeout=15000)
+                    front_loaded = True
+                except Exception as e:
+                    logger.warning(f"Front page elements not found after 15s: {e}")
+                    # Check if page has any content at all
+                    try:
+                        body_text = await self.page.locator('body').inner_text()
+                        if len(body_text.strip()) < 100:
+                            # Page is essentially empty - retry
+                            if attempt < max_retries - 1:
+                                logger.warning(f"Page appears empty, retrying (attempt {attempt + 1}/{max_retries})...")
+                                await asyncio.sleep(2)
+                                continue
+                    except:
+                        pass
+                
                 await self.human_delay(0.1, 0.25)
                 
                 # Scroll to bottom to trigger lazy loading of back table (plot data)
                 # This ensures gvRorBack is loaded even if it's below the fold
+                back_table_found = False
                 try:
                     await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await self.human_delay(0.3, 0.5)
                     # Try to wait for back table specifically
                     await self.page.wait_for_selector("#gvRorBack, #gvRorBack2, #gvplotdetail, table[id*='RorBack']", state="visible", timeout=5000)
+                    back_table_found = True
                 except Exception:
-                    pass  # Back table might not exist for this record, continue anyway
+                    # Back table not found - try scrolling again and looking for any table
+                    try:
+                        await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await self.human_delay(0.5, 0.8)
+                        # Look for any table that might contain plot data
+                        tables = await self.page.locator('table[id*="gv"], table[id*="Ror"]').count()
+                        if tables > 0:
+                            back_table_found = True
+                            logger.info(f"Found {tables} potential data tables via fallback")
+                    except:
+                        pass
+                
+                # Log loading status for debugging
+                logger.debug(f"Page load status: front={front_loaded}, back_table={back_table_found}")
 
                 # Extract data (with timeout protection for large khatiyans)
                 logger.info(f"Starting extraction for Khatiyan {khatiyan_text}...")
@@ -1284,7 +1313,20 @@ class BhulekhScraper:
                     logger.error(f"EXTRACTION TIMEOUT: Khatiyan {khatiyan_text} took >10min to extract")
                     raise Exception(f"Data extraction timed out for Khatiyan {khatiyan_text}")
                 extract_elapsed = time.time() - extract_start
-                logger.info(f"Extraction completed for Khatiyan {khatiyan_text} in {extract_elapsed:.1f}s")
+                
+                # Validate extraction results
+                plots_count = len(ror_data.get('plots', []))
+                filled_fields = sum(1 for k, v in ror_data.items() if v and v != [] and k != 'ror_type')
+                
+                logger.info(f"Extraction completed for Khatiyan {khatiyan_text} in {extract_elapsed:.1f}s - {plots_count} plots, {filled_fields} fields")
+                
+                # Warn if back table was found but no plots extracted (potential bug)
+                if back_table_found and plots_count == 0:
+                    logger.warning(f"⚠️ POTENTIAL BUG: Back table found but 0 plots extracted for Khatiyan {khatiyan_text}")
+                
+                # Warn if almost nothing was extracted (page might not have loaded properly)
+                if filled_fields < 3 and plots_count == 0:
+                    logger.warning(f"⚠️ SPARSE DATA: Only {filled_fields} fields extracted for Khatiyan {khatiyan_text}")
                 
                 # Add metadata
                 ror_data['district'] = district
