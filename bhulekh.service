@@ -16,8 +16,7 @@ ExecStart=/home/ubuntu/.local/bin/uv run python run_village_workers.py \
     --data-dir /home/ubuntu/justokay/bhulekh_data \
     --headless \
     --fast \
-    --priority-districts 3 23 --priority-level 100 \
-    --districts 3 9 10 16 18 19 20 21 23 24 26 27 30
+    --districts 3 9 10 16 19 20 21 23 24 26 27 30
 Restart=always
 RestartSec=30
 StandardOutput=journal
