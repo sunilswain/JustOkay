@@ -163,102 +163,120 @@ def create_village_excel(
 ) -> int:
     """Create an Excel file for a village with all its khatiyans.
     
+    Creates a FLAT format: one row per plot with all khatiyan metadata repeated.
     Returns the number of plots written.
     """
     wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
     
-    # --- Sheet 1: Summary (one row per khatiyan) ---
-    ws_summary = wb.active
-    ws_summary.title = "Summary"
-    
-    summary_headers = [
-        'Khatiyan No', 'Mouja', 'Tehsil', 'District', 'Thana',
-        'Landlord Name', 'Tenant Name', 'Status', 'Tax', 'Water Tax',
-        'Total', 'Plot Count', 'RoR Type'
+    # Flat headers - one row per plot with all metadata
+    headers = [
+        'District', 'Mouja', 'Tehsil', 'Thana', 'Thana No',
+        'Khatiyan No', 'Tenant Name', 'Landlord Name', 'Status',
+        'Plot No', 'Plot Chaka', 'Plot Kisam', 'Plot Land Type',
+        'Plot Acre', 'Plot Decimil', 'Plot Hector',
+        'N Occu', 'E Occu', 'S Occu', 'W Occu',
+        'Remark', 'Tax', 'Water Tax', 'Total', 'RoR Type', 'Village'
     ]
-    ws_summary.append(summary_headers)
+    ws.append(headers)
     
     # Style header row
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
-    for col, _ in enumerate(summary_headers, 1):
-        cell = ws_summary.cell(row=1, column=col)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal='center')
-    
-    for kh in khatiyans:
-        plots = kh.get('plots', [])
-        row = [
-            clean_for_excel(kh.get('khatiyan_text', '')),
-            clean_for_excel(kh.get('mouja', '')),
-            clean_for_excel(kh.get('tehsil', '')),
-            clean_for_excel(kh.get('district', '')),
-            clean_for_excel(kh.get('thana', '')),
-            clean_for_excel(kh.get('landlord_name', '')),
-            clean_for_excel(kh.get('tenant_name', '')),
-            clean_for_excel(kh.get('status', '')),
-            clean_for_excel(kh.get('tax', '')),
-            clean_for_excel(kh.get('water_tax', '')),
-            clean_for_excel(kh.get('total', '')),
-            len(plots),
-            clean_for_excel(kh.get('ror_type', '')),
-        ]
-        ws_summary.append(row)
-    
-    # Auto-width columns
-    for col in range(1, len(summary_headers) + 1):
-        ws_summary.column_dimensions[get_column_letter(col)].width = 15
-    
-    # --- Sheet 2: Plots (all plots from all khatiyans) ---
-    ws_plots = wb.create_sheet("Plots")
-    
-    plot_headers = [
-        'Khatiyan No', 'Plot No', 'Chaka', 'Land Type', 'Kisam',
-        'N Occu', 'E Occu', 'S Occu', 'W Occu',
-        'Acre', 'Decimil', 'Hector', 'Remarks'
-    ]
-    ws_plots.append(plot_headers)
-    
-    # Style header row
-    for col, _ in enumerate(plot_headers, 1):
-        cell = ws_plots.cell(row=1, column=col)
+    for col, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal='center')
     
     total_plots = 0
     for kh in khatiyans:
-        kh_no = clean_for_excel(kh.get('khatiyan_text', ''))
         plots = kh.get('plots', [])
-        for plot in plots:
+        
+        # Base row data (khatiyan metadata)
+        base_data = {
+            'district': clean_for_excel(kh.get('district', '')),
+            'mouja': clean_for_excel(kh.get('mouja', '')),
+            'tehsil': clean_for_excel(kh.get('tahasil', '') or kh.get('tehsil', '')),
+            'thana': clean_for_excel(kh.get('thana', '')),
+            'thana_no': clean_for_excel(kh.get('thana_no', '')),
+            'khatiyan_no': clean_for_excel(kh.get('khatiyan_text', '') or kh.get('khatiyan_sl_no', '')),
+            'tenant_name': clean_for_excel(kh.get('tenant_name', '')),
+            'landlord_name': clean_for_excel(kh.get('landlord_name', '')),
+            'status': clean_for_excel(kh.get('status', '')),
+            'tax': clean_for_excel(kh.get('tax', '')),
+            'water_tax': clean_for_excel(kh.get('water_tax', '')),
+            'total': clean_for_excel(kh.get('total', '')),
+            'ror_type': clean_for_excel(kh.get('ror_type', '')),
+            'village': clean_for_excel(kh.get('village', '') or village_name),
+        }
+        
+        if plots:
+            # One row per plot
+            for plot in plots:
+                row = [
+                    base_data['district'],
+                    base_data['mouja'],
+                    base_data['tehsil'],
+                    base_data['thana'],
+                    base_data['thana_no'],
+                    base_data['khatiyan_no'],
+                    base_data['tenant_name'],
+                    base_data['landlord_name'],
+                    base_data['status'],
+                    clean_for_excel(plot.get('plot_no', '')),
+                    clean_for_excel(plot.get('chaka', '')),
+                    clean_for_excel(plot.get('kisam', '')),
+                    clean_for_excel(plot.get('land_type', '')),
+                    clean_for_excel(plot.get('acre', '')),
+                    clean_for_excel(plot.get('decimil', '')),
+                    clean_for_excel(plot.get('hector', '')),
+                    clean_for_excel(plot.get('n_occu', '')),
+                    clean_for_excel(plot.get('e_occu', '')),
+                    clean_for_excel(plot.get('s_occu', '')),
+                    clean_for_excel(plot.get('w_occu', '')),
+                    clean_for_excel(plot.get('remarks', '')),
+                    base_data['tax'],
+                    base_data['water_tax'],
+                    base_data['total'],
+                    base_data['ror_type'],
+                    base_data['village'],
+                ]
+                ws.append(row)
+                total_plots += 1
+        else:
+            # Khatiyan with no plots - still include one row
             row = [
-                kh_no,
-                clean_for_excel(plot.get('plot_no', '')),
-                clean_for_excel(plot.get('chaka', '')),
-                clean_for_excel(plot.get('land_type', '')),
-                clean_for_excel(plot.get('kisam', '')),
-                clean_for_excel(plot.get('n_occu', '')),
-                clean_for_excel(plot.get('e_occu', '')),
-                clean_for_excel(plot.get('s_occu', '')),
-                clean_for_excel(plot.get('w_occu', '')),
-                clean_for_excel(plot.get('acre', '')),
-                clean_for_excel(plot.get('decimil', '')),
-                clean_for_excel(plot.get('hector', '')),
-                clean_for_excel(plot.get('remarks', '')),
+                base_data['district'],
+                base_data['mouja'],
+                base_data['tehsil'],
+                base_data['thana'],
+                base_data['thana_no'],
+                base_data['khatiyan_no'],
+                base_data['tenant_name'],
+                base_data['landlord_name'],
+                base_data['status'],
+                '', '', '', '', '', '', '',  # Empty plot fields
+                '', '', '', '',
+                '',
+                base_data['tax'],
+                base_data['water_tax'],
+                base_data['total'],
+                base_data['ror_type'],
+                base_data['village'],
             ]
-            ws_plots.append(row)
+            ws.append(row)
             total_plots += 1
     
     # Auto-width columns
-    for col in range(1, len(plot_headers) + 1):
-        ws_plots.column_dimensions[get_column_letter(col)].width = 12
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
     
-    # Freeze header rows
-    ws_summary.freeze_panes = 'A2'
-    ws_plots.freeze_panes = 'A2'
+    # Freeze header row
+    ws.freeze_panes = 'A2'
     
-    # Save
+    # Save (overwrites existing)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
     wb.close()
