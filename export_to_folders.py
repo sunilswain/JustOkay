@@ -9,7 +9,13 @@ Each village Excel file contains:
 - Sheet 2 "Plots": All plots across all khatiyans (detailed data)
 
 Usage:
+    # Export all scraped data
     python export_to_folders.py --data-dir bhulekh_data --output-dir export
+    
+    # Export only completed villages (checks work_queue.db)
+    python export_to_folders.py --data-dir bhulekh_data --output-dir export --queue-db work_queue.db --completed-only
+    
+    # Export specific district
     python export_to_folders.py --data-dir bhulekh_data --output-dir export --district କଟକ
 """
 
@@ -20,7 +26,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import openpyxl
@@ -62,9 +68,33 @@ def sanitize_filename(name: str) -> str:
     return name.strip() or "unknown"
 
 
-def read_sqlite_data(db_path: Path) -> List[Dict[str, Any]]:
-    """Read all khatiyan data from a SQLite database."""
+def get_completed_villages(queue_db: str) -> Set[Tuple[str, str, str]]:
+    """
+    Get set of (district_name, tahasil_name, village_name) tuples 
+    for villages marked as 'done' in the work queue.
+    """
+    completed = set()
+    try:
+        conn = sqlite3.connect(queue_db)
+        cursor = conn.execute(
+            "SELECT district_name, tahasil_name, village_name FROM villages WHERE status = 'done'"
+        )
+        for row in cursor:
+            completed.add((row[0], row[1], row[2]))
+        conn.close()
+        print(f"Found {len(completed)} completed villages in work queue")
+    except Exception as e:
+        print(f"Error reading work queue: {e}")
+    return completed
+
+
+def read_sqlite_data(db_path: Path, completed_villages: Optional[Set[Tuple[str, str, str]]] = None) -> List[Dict[str, Any]]:
+    """Read khatiyan data from a SQLite database.
+    
+    If completed_villages is provided, only returns khatiyans from those villages.
+    """
     records = []
+    skipped = 0
     try:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.execute(
@@ -72,6 +102,13 @@ def read_sqlite_data(db_path: Path) -> List[Dict[str, Any]]:
         )
         for row in cursor:
             district, tahasil, village, kh_value, kh_text, data_json = row
+            
+            # Filter by completed villages if specified
+            if completed_villages is not None:
+                if (district, tahasil, village) not in completed_villages:
+                    skipped += 1
+                    continue
+            
             try:
                 data = json.loads(data_json)
                 data['district'] = district
@@ -83,6 +120,8 @@ def read_sqlite_data(db_path: Path) -> List[Dict[str, Any]]:
             except json.JSONDecodeError:
                 pass
         conn.close()
+        if skipped > 0:
+            print(f"  Skipped {skipped} khatiyans from incomplete villages")
     except Exception as e:
         print(f"Error reading {db_path}: {e}")
     return records
@@ -232,14 +271,34 @@ def export_data(
     output_dir: str,
     filter_district: Optional[str] = None,
     filter_tahasil: Optional[str] = None,
+    queue_db: Optional[str] = None,
+    completed_only: bool = False,
 ):
-    """Export all data to folder structure with Excel files."""
+    """Export data to folder structure with Excel files.
+    
+    If completed_only=True, only exports villages marked as 'done' in the work queue.
+    Files are overwritten if they already exist.
+    """
     data_path = Path(data_dir)
     output_path = Path(output_dir)
     
     if not data_path.exists():
         print(f"ERROR: Data directory not found: {data_dir}")
         return
+    
+    # Get completed villages if filtering
+    completed_villages = None
+    if completed_only:
+        if not queue_db:
+            print("ERROR: --queue-db required when using --completed-only")
+            return
+        if not Path(queue_db).exists():
+            print(f"ERROR: Work queue not found: {queue_db}")
+            return
+        completed_villages = get_completed_villages(queue_db)
+        if not completed_villages:
+            print("No completed villages found in work queue")
+            return
     
     # Find all data files
     db_files = list(data_path.glob("district_*.db"))
@@ -249,19 +308,25 @@ def export_data(
         print(f"No data files found in {data_dir}")
         return
     
+    mode = "COMPLETED ONLY" if completed_only else "ALL DATA"
+    print(f"Export mode: {mode}")
     print(f"Found {len(db_files)} SQLite files and {len(ndjson_files)} NDJSON files")
     
     # Read all data
     all_records = []
     for db_file in db_files:
         print(f"Reading {db_file.name}...")
-        records = read_sqlite_data(db_file)
+        records = read_sqlite_data(db_file, completed_villages)
         all_records.extend(records)
         print(f"  -> {len(records)} khatiyans")
     
     for ndjson_file in ndjson_files:
         print(f"Reading {ndjson_file.name}...")
         records = read_ndjson_data(ndjson_file)
+        # Filter NDJSON records too if needed
+        if completed_villages is not None:
+            records = [r for r in records 
+                      if (r.get('district'), r.get('tahasil'), r.get('village')) in completed_villages]
         all_records.extend(records)
         print(f"  -> {len(records)} khatiyans")
     
@@ -326,7 +391,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", default="export",
-        help="Output directory for Excel files (default: export)"
+        help="Output directory for Excel files (default: export). Existing files are overwritten."
     )
     parser.add_argument(
         "--district", default=None,
@@ -336,6 +401,14 @@ def main():
         "--tahasil", default=None,
         help="Filter to specific tahasil name (Odia text)"
     )
+    parser.add_argument(
+        "--queue-db", default=None,
+        help="Path to work queue database (required for --completed-only)"
+    )
+    parser.add_argument(
+        "--completed-only", action="store_true",
+        help="Only export villages marked as 'done' in the work queue"
+    )
     
     args = parser.parse_args()
     
@@ -344,6 +417,8 @@ def main():
         output_dir=args.output_dir,
         filter_district=args.district,
         filter_tahasil=args.tahasil,
+        queue_db=args.queue_db,
+        completed_only=args.completed_only,
     )
 
 
