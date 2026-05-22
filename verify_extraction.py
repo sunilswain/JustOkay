@@ -165,6 +165,33 @@ async def capture_and_verify_khatiyan(
     Navigate to a khatiyan, capture HTML/screenshot, and compare with stored data.
     """
     from bhulekh_scraper import SELECTOR_DISTRICT, SELECTOR_TAHASIL, SELECTOR_VILLAGE, SELECTOR_KHATIYAN
+    import unicodedata
+    
+    def normalize_odia(text: str) -> str:
+        """Normalize Odia text for comparison - handles nukta variations."""
+        if not text:
+            return ""
+        # Normalize unicode and remove nukta (U+0B3C) for comparison
+        normalized = unicodedata.normalize('NFC', text)
+        # Remove Odia nukta character for fuzzy matching
+        return normalized.replace('\u0b3c', '')
+    
+    def find_match(options, target):
+        """Find matching option with fuzzy Odia text matching."""
+        target_norm = normalize_odia(target)
+        # Exact match first
+        for o in options:
+            if o['text'] == target:
+                return o
+        # Normalized match
+        for o in options:
+            if normalize_odia(o['text']) == target_norm:
+                return o
+        # Partial match
+        for o in options:
+            if target_norm in normalize_odia(o['text']) or normalize_odia(o['text']) in target_norm:
+                return o
+        return None
     
     result = {
         'khatiyan': khatiyan,
@@ -198,14 +225,8 @@ async def capture_and_verify_khatiyan(
         
         logger.debug(f"Available districts: {[o['text'] for o in district_opts[:5]]}...")
         
-        # Try exact match first, then partial match
-        district_match = next((o for o in district_opts if o['text'] == district), None)
-        if not district_match:
-            # Try stripping whitespace
-            district_match = next((o for o in district_opts if o['text'].strip() == district.strip()), None)
-        if not district_match:
-            # Try partial match
-            district_match = next((o for o in district_opts if district in o['text'] or o['text'] in district), None)
+        # Use fuzzy Odia matching
+        district_match = find_match(district_opts, district)
         
         if not district_match:
             result['error'] = f"District not found: {district}. Available: {[o['text'] for o in district_opts[:10]]}"
@@ -215,18 +236,18 @@ async def capture_and_verify_khatiyan(
         
         # Select tahasil
         tahasil_opts = await scraper.get_dropdown_options(SELECTOR_TAHASIL)
-        tahasil_match = next((o for o in tahasil_opts if o['text'] == tahasil), None)
+        tahasil_match = find_match(tahasil_opts, tahasil)
         if not tahasil_match:
-            result['error'] = f"Tahasil not found: {tahasil}"
+            result['error'] = f"Tahasil not found: {tahasil}. Available: {[o['text'] for o in tahasil_opts[:10]]}"
             return result
         await scraper.select_dropdown(SELECTOR_TAHASIL, tahasil_match['value'])
         await scraper.human_delay(0.5, 0.8)
         
         # Select village
         village_opts = await scraper.get_dropdown_options(SELECTOR_VILLAGE)
-        village_match = next((o for o in village_opts if o['text'] == village), None)
+        village_match = find_match(village_opts, village)
         if not village_match:
-            result['error'] = f"Village not found: {village}"
+            result['error'] = f"Village not found: {village}. Available: {[o['text'] for o in village_opts[:10]]}"
             return result
         await scraper.select_dropdown(SELECTOR_VILLAGE, village_match['value'])
         await scraper.human_delay(0.5, 0.8)
