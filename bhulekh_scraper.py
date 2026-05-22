@@ -1106,10 +1106,15 @@ class BhulekhScraper:
                         const row = rows[i];
                         const plot_data = {};
                         
-                        // Plot number - try multiple patterns
-                        const plotLink = row.querySelector('a[id*="lblPlotNo"], a[id*="Plot"]');
-                        const plotSpan = row.querySelector('span[id*="lblPlotNo"], span[id*="Plot"]');
-                        const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim();
+                        // Plot number - try multiple patterns (lblPlotcni has the actual number)
+                        const plotLink = row.querySelector('a[id*="lblPlotcni"], a[id*="lblPlotNo"], a[id*="Plot"]');
+                        const plotSpan = row.querySelector('span[id*="lblPlotcni"], span[id*="lblPlotNo"], span[id*="Plot"]');
+                        // Also try first cell or any link/span in row
+                        const cells = row.querySelectorAll('td');
+                        const firstCellText = cells[0]?.innerText?.trim();
+                        const anyLink = row.querySelector('a')?.innerText?.trim();
+                        
+                        const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim() || firstCellText || anyLink;
                         
                         if (!plotNo) continue;
                         plot_data.plot_no = plotNo;

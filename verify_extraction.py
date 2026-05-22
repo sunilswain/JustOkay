@@ -317,9 +317,14 @@ async def capture_and_verify_khatiyan(
         except Exception as e:
             result['fresh_extraction_error'] = str(e)
         
-        # Go back
-        await scraper.click_khatiyan_page_button()
-        await scraper.human_delay(0.5, 0.8)
+        # Go back to khatiyan selection page
+        try:
+            await scraper.click_khatiyan_page()
+            await scraper.human_delay(0.5, 0.8)
+        except Exception as e:
+            logger.warning(f"Could not click back button, navigating to RoR page: {e}")
+            await scraper.navigate_to_ror_page()
+            await scraper.human_delay(0.5, 0.8)
         
         result['success'] = True
         
