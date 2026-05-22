@@ -214,10 +214,13 @@ class BhulekhStorage(BhulekhStorageBase):
                 khatiyan_value TEXT NOT NULL,
                 khatiyan_text TEXT NOT NULL,
                 data_json TEXT NOT NULL,
+                html_content TEXT,
+                needs_review INTEGER DEFAULT 0,
                 fetched_at TEXT DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS ix_khatiyans_district ON khatiyans(district);
             CREATE INDEX IF NOT EXISTS ix_khatiyans_tahasil_village ON khatiyans(tahasil, village);
+            CREATE INDEX IF NOT EXISTS ix_khatiyans_needs_review ON khatiyans(needs_review) WHERE needs_review = 1;
 
             CREATE TABLE IF NOT EXISTS checkpoint (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -233,11 +236,24 @@ class BhulekhStorage(BhulekhStorageBase):
                 updated_at TEXT DEFAULT (datetime('now'))
             );
         """)
+        # Add columns to existing tables if they don't exist (migration)
+        try:
+            conn.execute("ALTER TABLE khatiyans ADD COLUMN html_content TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE khatiyans ADD COLUMN needs_review INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
 
-    def append_khatiyan(self, ror_data: Dict[str, Any]) -> None:
+    def append_khatiyan(self, ror_data: Dict[str, Any], html_content: Optional[str] = None) -> None:
         """
         Append one khatiyan record and its plots. Commits immediately for durability.
+        
+        Args:
+            ror_data: Extracted RoR data dictionary
+            html_content: Raw HTML of the RoR page (for re-extraction if needed)
         """
         conn = self._conn()
         district = ror_data.get("district", "")
@@ -246,12 +262,41 @@ class BhulekhStorage(BhulekhStorageBase):
         khatiyan_value = ror_data.get("khatiyan_value", "")
         khatiyan_text = ror_data.get("khatiyan_text", "")
         data_json = json.dumps(ror_data, ensure_ascii=False)
+        
+        # Flag records that may need review (empty plots or missing critical fields)
+        needs_review = self._check_needs_review(ror_data)
+        
         conn.execute(
-            """INSERT INTO khatiyans (district, tahasil, village, khatiyan_value, khatiyan_text, data_json)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (district, tahasil, village, khatiyan_value, khatiyan_text, data_json),
+            """INSERT INTO khatiyans (district, tahasil, village, khatiyan_value, khatiyan_text, data_json, html_content, needs_review)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (district, tahasil, village, khatiyan_value, khatiyan_text, data_json, html_content, needs_review),
         )
         conn.commit()
+    
+    def _check_needs_review(self, ror_data: Dict[str, Any]) -> int:
+        """Check if record might have extraction issues and needs review."""
+        plots = ror_data.get("plots", [])
+        
+        # No plots at all
+        if not plots:
+            return 1
+        
+        # Check each plot for missing critical fields
+        for plot in plots:
+            # Missing plot number
+            if not plot.get("plot_no", "").strip():
+                return 1
+            # All area fields empty (acre, decimil, hector)
+            acre = plot.get("acre", "").strip()
+            decimil = plot.get("decimil", "").strip()
+            hector = plot.get("hector", "").strip()
+            if not acre and not decimil and not hector:
+                # Check if this is a "no plots" message
+                kisam = plot.get("kisam", "")
+                if "ଉପଲବ୍ଧ ନାହିଁ" not in kisam:  # "not available" in Odia
+                    return 1
+        
+        return 0
 
     def set_checkpoint(
         self,

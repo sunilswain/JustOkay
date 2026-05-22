@@ -1307,6 +1307,13 @@ class BhulekhScraper:
                 # Log loading status for debugging
                 logger.debug(f"Page load status: front={front_loaded}, back_table={back_table_found}")
 
+                # Capture HTML for re-extraction capability
+                html_content = None
+                try:
+                    html_content = await self.page.content()
+                except Exception as html_err:
+                    logger.warning(f"Failed to capture HTML: {html_err}")
+                
                 # Extract data (with timeout protection for large khatiyans)
                 logger.info(f"Starting extraction for Khatiyan {khatiyan_text}...")
                 extract_start = time.time()
@@ -1349,7 +1356,7 @@ class BhulekhScraper:
                 total = len(self.data_list)
                 # Persistent storage: append immediately so no data loss on crash
                 if self._current_storage:
-                    self._current_storage.append_khatiyan(ror_data)
+                    self._current_storage.append_khatiyan(ror_data, html_content=html_content)
                     self._current_storage.set_checkpoint(
                         self._current_district_value or "",
                         self._current_district_text or "",
