@@ -1131,7 +1131,8 @@ class BhulekhScraper:
                         
                         // Extract all fields with fallback patterns
                         plot_data.chaka = getText(['span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="chaka"]']);
-                        plot_data.land_type = getText(['span[id*="lbllType"]', 'span[id*="LandType"]', '[id*="lType"]']);
+                        // Land type can be in lblCNItype or lbllType depending on page layout
+                        plot_data.land_type = getText(['span[id*="lblCNItype"]', 'span[id*="lbllType"]', 'span[id*="LandType"]', '[id*="lType"]', '[id*="CNItype"]']);
                         plot_data.kisam = getText(['span[id*="lblKisama"]', 'span[id*="Kisam"]', '[id*="Kisam"]']);
                         plot_data.n_occu = getText(['span[id*="lbln_occu"]', '[id*="n_occu"]']);
                         plot_data.e_occu = getText(['span[id*="lble_occu"]', '[id*="e_occu"]']);
