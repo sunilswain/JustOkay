@@ -50,30 +50,48 @@ def get_queue_villages(
     return [dict(r) for r in rows]
 
 
-def get_data_villages(data_dir: str, district_code: int) -> Dict[str, Set[str]]:
+def get_data_villages(data_dir: str, district_code: int, district_name: str = None) -> Dict[str, Set[str]]:
     """
     Get villages that have data in the district database.
     Returns: {tahasil_name: {village_name, ...}}
     """
     data_path = Path(data_dir)
-    db_path = data_path / f"district_{district_code}.db"
+    db_path = None
     
-    if not db_path.exists():
-        # Try to find by scanning
-        for f in data_path.glob("district_*.db"):
+    # List all available district DBs
+    all_dbs = list(data_path.glob("district_*.db"))
+    print(f"Available district databases: {len(all_dbs)}")
+    for db in all_dbs[:10]:  # Show first 10
+        print(f"  - {db.name}")
+    if len(all_dbs) > 10:
+        print(f"  ... and {len(all_dbs) - 10} more")
+    
+    # Strategy 1: If district_name provided, try direct match
+    if district_name:
+        # Sanitize name same way as storage.py
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in district_name).strip() or "unknown"
+        candidate = data_path / f"district_{safe_name}.db"
+        if candidate.exists():
+            db_path = candidate
+            print(f"Found DB by name: {db_path.name}")
+    
+    # Strategy 2: Scan all DBs and match by district name inside
+    if not db_path:
+        for f in all_dbs:
             try:
                 conn = sqlite3.connect(str(f))
-                # Check if this is the right district by code in filename
-                code = int(f.stem.replace("district_", ""))
-                if code == district_code:
-                    db_path = f
-                    break
+                row = conn.execute("SELECT DISTINCT district FROM khatiyans LIMIT 1").fetchone()
                 conn.close()
+                if row and row[0] == district_name:
+                    db_path = f
+                    print(f"Found DB by content match: {db_path.name}")
+                    break
             except:
                 pass
     
-    if not db_path.exists():
-        print(f"WARNING: District database not found for code {district_code}")
+    if not db_path:
+        print(f"WARNING: District database not found for '{district_name}' (code {district_code})")
+        print(f"Try running: ls -la {data_dir}/")
         return {}
     
     villages_by_tahasil = defaultdict(set)
@@ -89,6 +107,8 @@ def get_data_villages(data_dir: str, district_code: int) -> Dict[str, Set[str]]:
         
         for tahasil, village, kh_count in rows:
             villages_by_tahasil[tahasil].add(village)
+        
+        print(f"Loaded {sum(len(v) for v in villages_by_tahasil.values())} villages from {db_path.name}")
     except Exception as e:
         print(f"Error reading district DB: {e}")
     
@@ -131,8 +151,14 @@ def diagnose(
     queue_villages = get_queue_villages(queue_db, district_code, tahasil_code)
     print(f"Villages in work_queue.db: {len(queue_villages)}")
     
+    # Get district name from first village
+    district_name = None
+    if queue_villages:
+        district_name = queue_villages[0].get('district_name')
+        print(f"District name: {district_name}")
+    
     # Get villages from data DB
-    data_villages = get_data_villages(data_dir, district_code)
+    data_villages = get_data_villages(data_dir, district_code, district_name)
     total_data_villages = sum(len(v) for v in data_villages.values())
     print(f"Villages with data in district DB: {total_data_villages}")
     
