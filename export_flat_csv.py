@@ -81,102 +81,117 @@ def get_district_name_from_db(db_path: Path) -> str:
         return db_path.stem
 
 
+def _empty_plot_row() -> Dict[str, str]:
+    return {
+        'plot_plot_no': '',
+        'plot_chaka': '',
+        'plot_land_type': '',
+        'plot_kisam': '',
+        'plot_n_occu': '',
+        'plot_e_occu': '',
+        'plot_s_occu': '',
+        'plot_w_occu': '',
+        'plot_acre': '',
+        'plot_decimil': '',
+        'plot_hector': '',
+        'plot_remarks': '',
+    }
+
+
 def flatten_to_rows(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     Flatten khatiyan records to one row per plot.
     Each row contains khatiyan metadata + plot details.
     """
     rows = []
-    
+
     for kh in records:
         plots = kh.get('plots', [])
-        
-        # Base row with khatiyan metadata
+
         base_row = {
             'district': clean_value(kh.get('_district', '') or kh.get('district', '')),
             'mouja': clean_value(kh.get('mouja', '')),
             'tehsil': clean_value(kh.get('_tahasil', '') or kh.get('tehsil', '')),
             'thana': clean_value(kh.get('thana', '')),
+            'tehsil_no': clean_value(kh.get('tehsil_no', '')),
             'thana_no': clean_value(kh.get('thana_no', '')),
+            'landlord_name': clean_value(kh.get('landlord_name', '')),
             'khatiyan_sl_no': clean_value(kh.get('khatiyan_sl_no', '') or kh.get('_khatiyan_text', '')),
             'tenant_name': clean_value(kh.get('tenant_name', '')),
-            'landlord_name': clean_value(kh.get('landlord_name', '')),
             'status': clean_value(kh.get('status', '')),
-            'tax': clean_value(kh.get('tax', '')),
             'water_tax': clean_value(kh.get('water_tax', '')),
+            'tax': clean_value(kh.get('tax', '')),
+            'ses': clean_value(kh.get('ses', '')),
+            'other_ses': clean_value(kh.get('other_ses', '')),
             'total': clean_value(kh.get('total', '')),
-            'village': clean_value(kh.get('_village', '')),
+            'description': clean_value(kh.get('description', '')),
+            'special_case': clean_value(kh.get('special_case', '')),
+            'last_publish_date': clean_value(kh.get('last_publish_date', '')),
+            'tax_date': clean_value(kh.get('tax_date', '')),
+            'form_no': clean_value(kh.get('form_no', '')),
+            'parichheda': clean_value(kh.get('parichheda', '')),
         }
-        
+
         if plots:
-            # One row per plot
             for plot in plots:
                 row = base_row.copy()
                 row.update({
-                    'plot_no': clean_value(plot.get('plot_no', '')),
+                    'plot_plot_no': clean_value(plot.get('plot_no', '')),
                     'plot_chaka': clean_value(plot.get('chaka', '')),
-                    'plot_kisam': clean_value(plot.get('kisam', '')),
                     'plot_land_type': clean_value(plot.get('land_type', '')),
-                    'plot_acre': clean_value(plot.get('acre', '')),
-                    'plot_decimil': clean_value(plot.get('decimil', '')),
-                    'plot_hector': clean_value(plot.get('hector', '')),
+                    'plot_kisam': clean_value(plot.get('kisam', '')),
                     'plot_n_occu': clean_value(plot.get('n_occu', '')),
                     'plot_e_occu': clean_value(plot.get('e_occu', '')),
                     'plot_s_occu': clean_value(plot.get('s_occu', '')),
                     'plot_w_occu': clean_value(plot.get('w_occu', '')),
-                    'remark': clean_value(plot.get('remarks', '')),
+                    'plot_acre': clean_value(plot.get('acre', '')),
+                    'plot_decimil': clean_value(plot.get('decimil', '')),
+                    'plot_hector': clean_value(plot.get('hector', '')),
+                    'plot_remarks': clean_value(plot.get('remarks', '')),
                 })
                 rows.append(row)
         else:
-            # Khatiyan with no plots - still include it
             row = base_row.copy()
-            row.update({
-                'plot_no': '',
-                'plot_chaka': '',
-                'plot_kisam': '',
-                'plot_land_type': '',
-                'plot_acre': '',
-                'plot_decimil': '',
-                'plot_hector': '',
-                'plot_n_occu': '',
-                'plot_e_occu': '',
-                'plot_s_occu': '',
-                'plot_w_occu': '',
-                'remark': '',
-            })
+            row.update(_empty_plot_row())
             rows.append(row)
-    
+
     return rows
 
 
-# CSV column order (matching user's expected format)
 CSV_COLUMNS = [
     'district',
-    'mouja', 
+    'mouja',
     'tehsil',
     'thana',
+    'tehsil_no',
     'thana_no',
+    'landlord_name',
     'khatiyan_sl_no',
     'tenant_name',
-    'plot_no',
-    'plot_chaka',
-    'plot_kisam',
-    'plot_acre',
-    'plot_decimil',
-    'plot_hector',
-    'remark',
-    # Additional fields
-    'landlord_name',
     'status',
-    'tax',
     'water_tax',
+    'tax',
+    'ses',
+    'other_ses',
     'total',
-    'village',
+    'description',
+    'special_case',
+    'last_publish_date',
+    'tax_date',
+    'form_no',
+    'parichheda',
+    'plot_plot_no',
+    'plot_chaka',
     'plot_land_type',
+    'plot_kisam',
     'plot_n_occu',
     'plot_e_occu',
     'plot_s_occu',
     'plot_w_occu',
+    'plot_acre',
+    'plot_decimil',
+    'plot_hector',
+    'plot_remarks',
 ]
 
 

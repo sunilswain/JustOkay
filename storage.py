@@ -285,6 +285,36 @@ class BhulekhStorage(BhulekhStorageBase):
             pass  # Column already exists
         conn.commit()
 
+    def update_khatiyan(
+        self,
+        khatiyan_id: int,
+        ror_data: Dict[str, Any],
+        *,
+        needs_review: Optional[int] = None,
+        html_content: Optional[str] = None,
+    ) -> bool:
+        """Update an existing khatiyan record in place."""
+        conn = self._conn()
+        if needs_review is None:
+            needs_review = 1 if html_content else 0
+        try:
+            conn.execute(
+                """UPDATE khatiyans
+                   SET data_json = ?, html_content = COALESCE(?, html_content), needs_review = ?
+                   WHERE id = ?""",
+                (
+                    json.dumps(ror_data, ensure_ascii=False),
+                    html_content,
+                    needs_review,
+                    khatiyan_id,
+                ),
+            )
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception as exc:
+            logger.error("Failed to update khatiyan %s: %s", khatiyan_id, exc)
+            return False
+
     def append_khatiyan(self, ror_data: Dict[str, Any], html_content: Optional[str] = None) -> None:
         """
         Append one khatiyan record and its plots. Commits immediately for durability.
@@ -421,6 +451,16 @@ class BhulekhStorage(BhulekhStorageBase):
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+
+
+def get_storage_manager(
+    data_dir: str = DEFAULT_DATA_DIR,
+    district_name: str = "",
+    backend: str = DEFAULT_STORAGE_BACKEND,
+    **kwargs: Any,
+) -> BhulekhStorageBase:
+    """Return a storage manager for the given district."""
+    return create_storage(data_dir=data_dir, district_name=district_name, backend=backend, **kwargs)
 
 
 def list_district_db_paths(data_dir: str = DEFAULT_DATA_DIR) -> List[Path]:
