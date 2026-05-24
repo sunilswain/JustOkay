@@ -34,6 +34,7 @@ def _find_chromium_executable():
 
 
 import asyncio
+import re
 import pandas as pd
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 import logging
@@ -77,6 +78,120 @@ SELECTOR_VILLAGE = 'select#ctl00_ContentPlaceHolder1_ddlVillage, select[id*="ddl
 SELECTOR_KHATIYAN = 'select#ctl00_ContentPlaceHolder1_ddlBindData, select[id*="ddlBindData"]'
 # Khatiyan radio can be disabled until District/Tahasil are selected
 SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, input[value="Khatiyan"][name*="rbtnRORSearchtype"]'
+
+# RoR back-page plot table IDs (Type-1 gvfront + Form-99 variants share these)
+_PLOT_TABLE_IDS = ['gvRorBack', 'gvRorBack2', 'gvRorFrontBack', 'gvplotdetail']
+_NON_PLOT_TABLE_IDS = frozenset({'gvfront'})
+
+# Single JS blob for bulk plot extraction — used by Type-1 and Type-2 paths alike.
+_EXTRACT_PLOTS_JS = """
+() => {
+    const PLOT_TABLE_IDS = %PLOT_TABLE_IDS%;
+    const NON_PLOT_TABLE_IDS = new Set(%NON_PLOT_TABLE_IDS%);
+
+    const cellText = (el) => {
+        if (!el) return '';
+        return (el.innerText || el.textContent || '').trim();
+    };
+
+    const getText = (row, patterns) => {
+        if (typeof patterns === 'string') patterns = [patterns];
+        for (const sel of patterns) {
+            const el = row.querySelector(sel);
+            const val = cellText(el);
+            if (val !== '') return val;
+        }
+        return '';
+    };
+
+    const getPlotNo = (row) => {
+        // Order matters: non-chaka plot → chaka number → chaka plot name
+        const selectors = [
+            'a[id*="lblPlotcni"]', 'span[id*="lblPlotcni"]',
+            'a[id*="lblPlotNo"]', 'span[id*="lblPlotNo"]',
+            'a[id*="lblPlotci"]', 'span[id*="lblPlotci"]',
+        ];
+        for (const sel of selectors) {
+            const val = cellText(row.querySelector(sel));
+            if (val && /\\d/.test(val)) return val;
+        }
+        return '';
+    };
+
+    const getChaka = (row) => {
+        // Layout A: lblchaka span (simple table)
+        const direct = getText(row, [
+            'span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="lblchaka"]',
+        ]);
+        if (direct) return direct;
+        // Layout B: lblPlotci link — e.g. "767/1089 ଗ୍ରାମତଳ" or "2 ପିତାବଳୀ"
+        const plotci = getText(row, ['a[id*="lblPlotci"]', 'span[id*="lblPlotci"]']);
+        if (!plotci) return '';
+        const m = plotci.match(/^[\\d\\/]+\\s+(.+)$/);
+        return m ? m[1].trim() : plotci;
+    };
+
+    const countPlotMarkers = (root) =>
+        root.querySelectorAll('[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"]').length;
+
+    const findPlotTable = () => {
+        for (const tableId of PLOT_TABLE_IDS) {
+            const table = document.getElementById(tableId);
+            if (table) return { table, tableId };
+        }
+        let best = null;
+        let bestScore = 0;
+        for (const table of document.querySelectorAll('table[id]')) {
+            const id = table.id || '';
+            if (NON_PLOT_TABLE_IDS.has(id)) continue;
+            if (!/Ror|plot|Back/i.test(id)) continue;
+            const score = countPlotMarkers(table);
+            if (score > bestScore) {
+                bestScore = score;
+                best = { table, tableId: id || 'scored-fallback' };
+            }
+        }
+        return best;
+    };
+
+    const extractFromRows = (rows) => {
+        const results = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const plotNo = getPlotNo(row);
+            if (!plotNo) continue;
+
+            results.push({
+                plot_no: plotNo,
+                chaka: getChaka(row),
+                land_type: getText(row, [
+                    'span[id*="lblCNItype"]', 'span[id*="lbllType"]',
+                    'span[id*="LandType"]', '[id*="CNItype"]',
+                ]),
+                kisam: getText(row, ['span[id*="lblKisama"]', 'span[id*="Kisam"]', '[id*="Kisam"]']),
+                n_occu: getText(row, ['span[id*="lbln_occu"]', '[id*="n_occu"]']),
+                e_occu: getText(row, ['span[id*="lble_occu"]', '[id*="e_occu"]']),
+                s_occu: getText(row, ['span[id*="lbls_occu"]', '[id*="s_occu"]']),
+                w_occu: getText(row, ['span[id*="lblw_occu"]', '[id*="w_occu"]']),
+                acre: getText(row, ['span[id*="lblAcre"]', 'span[id*="Acre"]', '[id*="Acre"]']),
+                decimil: getText(row, ['span[id*="lblDecimil"]', 'span[id*="Decimil"]', '[id*="Decimil"]']),
+                hector: getText(row, ['span[id*="lblHector"]', 'span[id*="Hector"]', '[id*="Hector"]']),
+                remarks: getText(row, ['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]', '[id*="Remark"]']),
+            });
+        }
+        return results;
+    };
+
+    const found = findPlotTable();
+    if (!found) return { plots: [], tableId: '', rowCount: 0 };
+
+    const rows = found.table.querySelectorAll('tr');
+    const plots = extractFromRows(rows);
+    return { plots, tableId: found.tableId, rowCount: rows.length };
+}
+""".replace('%PLOT_TABLE_IDS%', json.dumps(_PLOT_TABLE_IDS)).replace(
+    '%NON_PLOT_TABLE_IDS%', json.dumps(list(_NON_PLOT_TABLE_IDS))
+)
 
 # ── Resilience tunables ────────────────────────────────────────────────────────
 # Per-village hard timeout (seconds).  If a village takes longer than this the
@@ -154,6 +269,35 @@ class BhulekhScraper:
         self.delay_scale = delay_scale  # 1.0 = normal; 0.15 = fast (--fast). All human_delay() and fixed sleeps scaled.
         self._current_district_value: Optional[str] = None
         self._current_district_text: Optional[str] = None
+        self.layout_stats: Dict[str, int] = {'type1': 0, 'type2': 0}
+        
+    def _record_layout_stat(self, ror_type: str) -> None:
+        """Track Type-1 vs Type-2 layout counts (session + persistent storage)."""
+        key = ror_type if ror_type in self.layout_stats else 'type1'
+        self.layout_stats[key] = self.layout_stats.get(key, 0) + 1
+        if self._current_storage:
+            self._current_storage.increment_layout_stat(key)
+        total = sum(self.layout_stats.values())
+        if total % 25 == 0:
+            logger.info(
+                f"Layout stats (session): type1={self.layout_stats.get('type1', 0)}, "
+                f"type2={self.layout_stats.get('type2', 0)}"
+            )
+
+    async def _extract_form99_header_fields(self) -> Dict[str, str]:
+        """Parse Form 99 header fields embedded as plain text (not always in labeled spans)."""
+        fields: Dict[str, str] = {'form_no': '', 'parichheda': ''}
+        try:
+            body = await self.page.locator('body').inner_text()
+            m = re.search(r'ଫର୍ମ\s*ନଂ\s*[-–]?\s*(\S+)', body)
+            if m:
+                fields['form_no'] = m.group(1).strip()
+            m = re.search(r'ପରିଚ୍ଛେଦ\s*[-–]?\s*(\S+)', body)
+            if m:
+                fields['parichheda'] = m.group(1).strip()
+        except Exception:
+            pass
+        return fields
         
     async def init_browser(self, headless: bool = False):
         """
@@ -811,16 +955,9 @@ class BhulekhScraper:
     
     async def _is_type2_ror(self) -> bool:
         """
-        Detect Type-2 RoR layout: "ପରିଶିଷ୍ଟ - ଖ / Form 99" page.
-        Type 1 uses #gvfront GridView; Type 2 uses a different table structure
-        with Odia labels like ଭୂ-ସ୍ୱାମୀ (landlord) and ରୟତ (tenant).
+        Detect Type-2 RoR layout: Form 99 / ପରିଶିଷ୍ଟ pages.
+        Includes Form-99 appendix pages that still use #gvfront with lblPlotci plot tables.
         """
-        # Quickest check: Type 1 mouja label present → definitely Type 1
-        if await self.page.locator('#gvfront_ctl02_lblMouja').count() > 0:
-            mouja = await self.page.locator('#gvfront_ctl02_lblMouja').inner_text()
-            if mouja.strip():
-                return False
-        # Check for Type-2 marker text on page
         body = await self.page.locator('body').inner_text()
         type2_markers = ['ପରିଶିଷ୍ଟ', 'ଫର୍ମ ନଂ', 'ପରିଚ୍ଛେଦ', 'ଭୂ-ସ୍ୱାମୀ']
         return any(m in body for m in type2_markers)
@@ -834,7 +971,14 @@ class BhulekhScraper:
         try:
             if await self._is_type2_ror():
                 logger.info("Detected Type-2 RoR layout (ପରିଶିଷ୍ଟ / Form-99)")
-                return await self.extract_ror_data_type2()
+                data = await self.extract_ror_data_type2()
+                # Form-99 appendix pages still render #gvfront — gvfront fields take precedence
+                if await self.page.locator('#gvfront').count() > 0:
+                    front_data = await self.extract_front_page_data()
+                    for field, val in front_data.items():
+                        if val:
+                            data[field] = val
+                return data
 
             data = {}
             front_data = await self.extract_front_page_data()
@@ -936,65 +1080,14 @@ class BhulekhScraper:
             except Exception as e:
                 logger.warning(f"Type-2 label scan failed: {e}")
 
-        # ── Plot rows: Type-2 back table (gvRorBack or variant) ───────────────
+        form99 = await self._extract_form99_header_fields()
+        for field in ('form_no', 'parichheda'):
+            if form99.get(field) and not data.get(field):
+                data[field] = form99[field]
+
+        # ── Plot rows: same back-table extractor as Type-1 ────────────────────
         back_plots = await self.extract_back_page_data()
-        if back_plots:
-            data['plots'] = back_plots
-        else:
-            # Try alternative back table selectors with actual extraction
-            alt_table_ids = ['gvRorBack2', 'gvRorFrontBack', 'gvplotdetail', 'gvRorBack']
-            for table_id in alt_table_ids:
-                try:
-                    alt_plots = await self.page.evaluate(f"""
-                        () => {{
-                            const results = [];
-                            const table = document.getElementById('{table_id}');
-                            if (!table) return results;
-                            const rows = table.querySelectorAll('tr');
-                            
-                            for (let i = 1; i < rows.length; i++) {{
-                                const row = rows[i];
-                                const cells = row.querySelectorAll('td');
-                                if (cells.length < 3) continue;
-                                
-                                const plot_data = {{}};
-                                
-                                // Try to find plot number
-                                const plotLink = row.querySelector('a[id*="lblPlotNo"], a[id*="Plot"]');
-                                const plotSpan = row.querySelector('span[id*="lblPlotNo"], span[id*="Plot"]');
-                                const plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim() || cells[0]?.innerText?.trim();
-                                if (!plotNo || plotNo === '') continue;
-                                
-                                plot_data.plot_no = plotNo;
-                                
-                                // Extract other fields by looking for spans with known IDs
-                                const getText = (patterns) => {{
-                                    for (const p of patterns) {{
-                                        const el = row.querySelector(p);
-                                        if (el && el.innerText.trim()) return el.innerText.trim();
-                                    }}
-                                    return '';
-                                }};
-                                
-                                plot_data.chaka = getText(['span[id*="lblchaka"]', 'span[id*="Chaka"]']);
-                                plot_data.land_type = getText(['span[id*="lbllType"]', 'span[id*="LandType"]', 'span[id*="lType"]']);
-                                plot_data.kisam = getText(['span[id*="lblKisama"]', 'span[id*="Kisam"]']);
-                                plot_data.acre = getText(['span[id*="lblAcre"]', 'span[id*="Acre"]']);
-                                plot_data.decimil = getText(['span[id*="lblDecimil"]', 'span[id*="Decimil"]']);
-                                plot_data.hector = getText(['span[id*="lblHector"]', 'span[id*="Hector"]']);
-                                plot_data.remarks = getText(['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]']);
-                                
-                                results.push(plot_data);
-                            }}
-                            return results;
-                        }}
-                    """)
-                    if alt_plots and len(alt_plots) > 0:
-                        logger.info(f"Type-2: Extracted {len(alt_plots)} plots from {table_id}")
-                        data['plots'] = alt_plots
-                        break
-                except Exception as e:
-                    logger.debug(f"Type-2 alt table {table_id} failed: {e}")
+        data['plots'] = back_plots
 
         # Log what we captured
         filled = sum(1 for v in data.values() if v and v != [] and v != 'type2')
@@ -1044,6 +1137,11 @@ class BhulekhScraper:
             data['special_case'] = await self.page.locator('#gvfront_ctl02_lblSpecialCase').inner_text() if await self.page.locator('#gvfront_ctl02_lblSpecialCase').count() > 0 else ""
             data['last_publish_date'] = await self.page.locator('#gvfront_ctl02_lblLastPublishDate').inner_text() if await self.page.locator('#gvfront_ctl02_lblLastPublishDate').count() > 0 else ""
             data['tax_date'] = await self.page.locator('#gvfront_ctl02_lblTaxDate').inner_text() if await self.page.locator('#gvfront_ctl02_lblTaxDate').count() > 0 else ""
+
+            form99 = await self._extract_form99_header_fields()
+            for field in ('form_no', 'parichheda'):
+                if form99.get(field) and not data.get(field):
+                    data[field] = form99[field]
             
         except Exception as e:
             logger.error(f"Error extracting front page data: {e}")
@@ -1052,125 +1150,51 @@ class BhulekhScraper:
     
     async def extract_back_page_data(self) -> List[Dict]:
         """Extract plot data from the back page of RoR.
-        
+
         Uses a single JavaScript evaluation to extract ALL rows at once,
         avoiding thousands of individual browser round-trips that would
         cause timeouts on large khatiyans (750+ rows).
-        
-        Tries multiple table IDs to handle different page layouts.
+
+        Tries multiple table IDs and scores fallback candidates by plot markers.
         """
-        plots = []
-        
+        plots: List[Dict] = []
+
         try:
-            # Try multiple table selectors - different pages use different IDs
-            plots = await self.page.evaluate("""
-                () => {
-                    const results = [];
-                    
-                    // Try multiple table IDs
-                    const tableIds = ['gvRorBack', 'gvRorBack2', 'gvRorFrontBack', 'gvplotdetail'];
-                    let rows = null;
-                    let tableFound = '';
-                    
-                    for (const tableId of tableIds) {
-                        const table = document.getElementById(tableId);
-                        if (table) {
-                            rows = table.querySelectorAll('tr');
-                            if (rows && rows.length > 2) {
-                                tableFound = tableId;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // Fallback: try any table with plot-like content
-                    if (!rows || rows.length <= 2) {
-                        const allTables = document.querySelectorAll('table[id*="gv"], table[id*="Ror"], table[id*="plot"]');
-                        for (const table of allTables) {
-                            const trs = table.querySelectorAll('tr');
-                            if (trs.length > 2) {
-                                rows = trs;
-                                tableFound = table.id || 'fallback-table';
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (!rows) return results;
-                    
-                    // Iterate through ALL rows and check each for plot data
-                    // This handles variable header row counts
-                    for (let i = 0; i < rows.length; i++) {
-                        const row = rows[i];
-                        const plot_data = {};
-                        
-                        // Look for plot number elements with specific IDs
-                        const plotLink = row.querySelector('a[id*="lblPlotcni"], a[id*="lblPlotNo"]');
-                        const plotSpan = row.querySelector('span[id*="lblPlotcni"], span[id*="lblPlotNo"]');
-                        
-                        // Get plot number from specific elements
-                        let plotNo = plotLink?.innerText?.trim() || plotSpan?.innerText?.trim();
-                        
-                        // Skip if no valid plot number found (header rows won't have these elements)
-                        if (!plotNo) continue;
-                        
-                        // Validate it looks like a plot number (should have digits)
-                        if (!/\d/.test(plotNo)) continue;
-                        
-                        plot_data.plot_no = plotNo;
-                        
-                        // Helper to get text from multiple selector patterns
-                        const getText = (patterns) => {
-                            if (typeof patterns === 'string') patterns = [patterns];
-                            for (const sel of patterns) {
-                                const el = row.querySelector(sel);
-                                if (el && el.innerText.trim()) return el.innerText.trim();
-                            }
-                            return '';
-                        };
-                        
-                        // Extract all fields with fallback patterns
-                        plot_data.chaka = getText(['span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="chaka"]']);
-                        // Land type can be in lblCNItype or lbllType depending on page layout
-                        plot_data.land_type = getText(['span[id*="lblCNItype"]', 'span[id*="lbllType"]', 'span[id*="LandType"]', '[id*="lType"]', '[id*="CNItype"]']);
-                        plot_data.kisam = getText(['span[id*="lblKisama"]', 'span[id*="Kisam"]', '[id*="Kisam"]']);
-                        plot_data.n_occu = getText(['span[id*="lbln_occu"]', '[id*="n_occu"]']);
-                        plot_data.e_occu = getText(['span[id*="lble_occu"]', '[id*="e_occu"]']);
-                        plot_data.s_occu = getText(['span[id*="lbls_occu"]', '[id*="s_occu"]']);
-                        plot_data.w_occu = getText(['span[id*="lblw_occu"]', '[id*="w_occu"]']);
-                        plot_data.acre = getText(['span[id*="lblAcre"]', 'span[id*="Acre"]', '[id*="Acre"]']);
-                        plot_data.decimil = getText(['span[id*="lblDecimil"]', 'span[id*="Decimil"]', '[id*="Decimil"]']);
-                        plot_data.hector = getText(['span[id*="lblHector"]', 'span[id*="Hector"]', '[id*="Hector"]']);
-                        plot_data.remarks = getText(['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]', '[id*="Remark"]']);
-                        
-                        results.push(plot_data);
-                    }
-                    return results;
-                }
-            """)
-            
+            result = await self.page.evaluate(_EXTRACT_PLOTS_JS)
+            plots = result.get('plots', []) if isinstance(result, dict) else (result or [])
+            table_id = result.get('tableId', '') if isinstance(result, dict) else ''
+            row_count = result.get('rowCount', 0) if isinstance(result, dict) else 0
+
             if plots:
-                logger.info(f"Extracted {len(plots)} plots via JS bulk extraction")
+                logger.info(
+                    f"Extracted {len(plots)} plots via JS bulk extraction"
+                    + (f" (table={table_id}, rows={row_count})" if table_id else "")
+                )
             else:
-                # Log debug info about what tables exist on the page
                 try:
                     table_info = await self.page.evaluate("""
                         () => {
-                            const tables = document.querySelectorAll('table');
+                            const tables = document.querySelectorAll('table[id]');
                             return Array.from(tables).map(t => ({
                                 id: t.id || '(no id)',
                                 rows: t.querySelectorAll('tr').length,
-                                hasPlotLink: t.querySelector('a[id*="Plot"], span[id*="Plot"]') !== null
-                            })).filter(t => t.rows > 1);
+                                plotMarkers: t.querySelectorAll(
+                                    '[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"]'
+                                ).length,
+                            })).filter(t => t.rows > 1)
+                             .sort((a, b) => b.plotMarkers - a.plotMarkers)
+                             .slice(0, 5);
                         }
                     """)
-                    logger.warning(f"No plots extracted. Tables on page: {table_info[:5]}")  # First 5 tables
-                except:
+                    logger.warning(
+                        f"No plots extracted. Top tables by plot markers: {table_info}"
+                    )
+                except Exception:
                     logger.warning("No plots extracted and couldn't inspect page tables")
-                    
+
         except Exception as e:
             logger.error(f"Error extracting back page data: {e}")
-        
+
         return plots
     
     async def click_view_ror(self):
@@ -1331,7 +1355,16 @@ class BhulekhScraper:
                 
                 # Warn if back table was found but no plots extracted (potential bug)
                 if back_table_found and plots_count == 0:
-                    logger.warning(f"⚠️ POTENTIAL BUG: Back table found but 0 plots extracted for Khatiyan {khatiyan_text}")
+                    try:
+                        no_plots_msg = await self.page.locator(
+                            '[id*="lblKisama"]:has-text("ଉପଲବ୍ଧ ନାହିଁ")'
+                        ).count() > 0
+                    except Exception:
+                        no_plots_msg = False
+                    if not no_plots_msg:
+                        logger.warning(
+                            f"⚠️ POTENTIAL BUG: Back table found but 0 plots extracted for Khatiyan {khatiyan_text}"
+                        )
                 
                 # Warn if almost nothing was extracted (page might not have loaded properly)
                 if filled_fields < 3 and plots_count == 0:
@@ -1370,6 +1403,7 @@ class BhulekhScraper:
                 ror_data['village'] = village
                 ror_data['khatiyan_value'] = khatiyan_value
                 ror_data['khatiyan_text'] = khatiyan_text
+                self._record_layout_stat(ror_data.get('ror_type', 'type1'))
                 
                 # Store data
                 self.data_list.append(ror_data)

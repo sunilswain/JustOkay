@@ -69,6 +69,13 @@ class BhulekhStorageBase:
     def get_khatiyan_count(self) -> int:
         raise NotImplementedError
 
+    def increment_layout_stat(self, ror_type: str) -> None:
+        """Increment Type-1 / Type-2 layout counter (optional per backend)."""
+        pass
+
+    def get_layout_stats(self) -> Dict[str, int]:
+        return {'type1': 0, 'type2': 0}
+
     def close(self) -> None:
         pass
 
@@ -88,6 +95,7 @@ class BhulekhStorageNDJSON(BhulekhStorageBase):
         self.safe_name = _sanitize_district_for_filename(self.district_name)
         self._ndjson_path = self.data_dir / f"district_{self.safe_name}.ndjson"
         self._checkpoint_path = self.data_dir / f"district_{self.safe_name}_checkpoint.json"
+        self._layout_stats_path = self.data_dir / f"district_{self.safe_name}_layout_stats.json"
         self._file = None
         self._count = 0
         self._lock = threading.Lock()
@@ -155,6 +163,29 @@ class BhulekhStorageNDJSON(BhulekhStorageBase):
             return 0
         with open(self._ndjson_path, "r", encoding="utf-8") as f:
             return sum(1 for _ in f)
+
+    def increment_layout_stat(self, ror_type: str) -> None:
+        key = ror_type if ror_type in ('type1', 'type2') else 'type1'
+        with self._lock:
+            stats = self.get_layout_stats()
+            stats[key] = stats.get(key, 0) + 1
+            tmp = self._layout_stats_path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(stats, f, ensure_ascii=False, indent=0)
+            tmp.replace(self._layout_stats_path)
+
+    def get_layout_stats(self) -> Dict[str, int]:
+        if not self._layout_stats_path.exists():
+            return {'type1': 0, 'type2': 0}
+        try:
+            with open(self._layout_stats_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                'type1': int(data.get('type1', 0)),
+                'type2': int(data.get('type2', 0)),
+            }
+        except Exception:
+            return {'type1': 0, 'type2': 0}
 
     def close(self) -> None:
         with self._lock:
@@ -233,6 +264,13 @@ class BhulekhStorage(BhulekhStorageBase):
                 last_khatiyan_value TEXT,
                 last_khatiyan_text TEXT,
                 khatiyan_count INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS layout_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                type1_count INTEGER DEFAULT 0,
+                type2_count INTEGER DEFAULT 0,
                 updated_at TEXT DEFAULT (datetime('now'))
             );
         """)
@@ -347,6 +385,28 @@ class BhulekhStorage(BhulekhStorageBase):
         conn = self._conn()
         r = conn.execute("SELECT COUNT(*) FROM khatiyans").fetchone()
         return r[0] if r else 0
+
+    def increment_layout_stat(self, ror_type: str) -> None:
+        key = ror_type if ror_type in ('type1', 'type2') else 'type1'
+        col = 'type1_count' if key == 'type1' else 'type2_count'
+        conn = self._conn()
+        conn.execute(
+            f"""INSERT INTO layout_stats (id, type1_count, type2_count, updated_at)
+                VALUES (1, {1 if key == 'type1' else 0}, {1 if key == 'type2' else 0}, datetime('now'))
+                ON CONFLICT(id) DO UPDATE SET
+                  {col} = {col} + 1,
+                  updated_at = datetime('now')"""
+        )
+        conn.commit()
+
+    def get_layout_stats(self) -> Dict[str, int]:
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT type1_count, type2_count FROM layout_stats WHERE id = 1"
+        ).fetchone()
+        if not row:
+            return {'type1': 0, 'type2': 0}
+        return {'type1': row[0] or 0, 'type2': row[1] or 0}
 
     def close(self) -> None:
         if hasattr(self._local, "conn") and self._local.conn is not None:
