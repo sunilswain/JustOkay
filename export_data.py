@@ -3,25 +3,29 @@
 Unified export script for Bhulekh RoR data.
 
 Supports CSV and Excel formats, per-district or per-village output.
+Use district codes (numbers) instead of Odia names for easier filtering.
 
 Usage Examples:
+    # List available districts with their codes
+    uv run python export_data.py --list-districts
+
     # Export all districts to CSV (one file per district)
     uv run python export_data.py --data-dir bhulekh_data --output-dir export
 
-    # Export specific districts to CSV
-    uv run python export_data.py --data-dir bhulekh_data --output-dir export --districts କଟକ ଅନୁଗୋଳ
+    # Export specific districts by CODE (easier than Odia names!)
+    uv run python export_data.py --data-dir bhulekh_data --districts 3 11 23
 
     # Export to Excel format
-    uv run python export_data.py --data-dir bhulekh_data --output-dir export --format xlsx
+    uv run python export_data.py --data-dir bhulekh_data --format xlsx
 
     # Export individual village files (organized by district/tahasil/village)
-    uv run python export_data.py --data-dir bhulekh_data --output-dir export --by-village
+    uv run python export_data.py --data-dir bhulekh_data --by-village
 
     # Export specific district with village-level files in Excel
-    uv run python export_data.py --data-dir bhulekh_data --output-dir export --districts କଟକ --by-village --format xlsx
+    uv run python export_data.py --data-dir bhulekh_data --districts 3 --by-village --format xlsx
 
     # Single combined file for all data
-    uv run python export_data.py --data-dir bhulekh_data --output-dir export --single-file
+    uv run python export_data.py --data-dir bhulekh_data --single-file
 """
 
 import argparse
@@ -30,7 +34,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Regex to remove illegal characters
 ILLEGAL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]')
@@ -58,6 +62,101 @@ def clean_value(value: Any) -> str:
         if len(value) > 32000:
             value = value[:32000] + '...'
     return str(value)
+
+
+def build_district_mapping(data_dir: Path, queue_db: Optional[Path] = None) -> Dict[int, str]:
+    """
+    Build a mapping of district_code -> district_name.
+    Uses work_queue.db if available, otherwise extracts from district databases.
+    """
+    mapping = {}
+    
+    # Try work_queue.db first (has the most reliable mapping)
+    if queue_db and queue_db.exists():
+        try:
+            conn = sqlite3.connect(str(queue_db))
+            rows = conn.execute(
+                "SELECT DISTINCT district_code, district_name FROM villages ORDER BY district_code"
+            ).fetchall()
+            conn.close()
+            for code, name in rows:
+                mapping[code] = name
+            if mapping:
+                return mapping
+        except Exception:
+            pass
+    
+    # Fallback: scan district database files
+    db_files = sorted(data_dir.glob("district_*.db"))
+    for db_path in db_files:
+        # Extract code from filename (district_X.db)
+        try:
+            code_str = db_path.stem.replace("district_", "")
+            code = int(code_str)
+        except ValueError:
+            continue
+        
+        # Get name from inside DB
+        try:
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute("SELECT DISTINCT district FROM khatiyans LIMIT 1").fetchone()
+            conn.close()
+            if row:
+                mapping[code] = row[0]
+        except Exception:
+            pass
+    
+    return mapping
+
+
+def resolve_district_filter(
+    districts_arg: Optional[List[str]],
+    data_dir: Path,
+    queue_db: Optional[Path] = None
+) -> Tuple[Optional[Set[str]], Dict[int, str]]:
+    """
+    Resolve district filter arguments (can be codes or names).
+    Returns (set of district names to filter, district mapping).
+    """
+    mapping = build_district_mapping(data_dir, queue_db)
+    
+    if not districts_arg:
+        return None, mapping
+    
+    district_names = set()
+    for d in districts_arg:
+        # Check if it's a numeric code
+        try:
+            code = int(d)
+            if code in mapping:
+                district_names.add(mapping[code])
+            else:
+                print(f"WARNING: District code {code} not found, skipping")
+        except ValueError:
+            # It's a name (Odia text)
+            district_names.add(d)
+    
+    return district_names if district_names else None, mapping
+
+
+def list_districts(data_dir: Path, queue_db: Optional[Path] = None):
+    """Print a list of available districts with their codes."""
+    mapping = build_district_mapping(data_dir, queue_db)
+    
+    if not mapping:
+        print("No districts found. Check --data-dir path.")
+        return
+    
+    print("\nAvailable Districts:")
+    print("-" * 50)
+    print(f"{'Code':<8} {'District Name'}")
+    print("-" * 50)
+    
+    for code in sorted(mapping.keys()):
+        print(f"{code:<8} {mapping[code]}")
+    
+    print("-" * 50)
+    print(f"\nUse --districts with codes, e.g.: --districts {' '.join(str(c) for c in list(mapping.keys())[:3])}")
 
 
 def sanitize_filename(name: str) -> str:
@@ -230,6 +329,7 @@ def export_data(
     districts: Optional[List[str]] = None,
     by_village: bool = False,
     single_file: bool = False,
+    queue_db: Optional[str] = None,
 ):
     """
     Export data with flexible options.
@@ -238,9 +338,10 @@ def export_data(
         data_dir: Directory containing district SQLite files
         output_dir: Output directory
         fmt: Output format ('csv' or 'xlsx')
-        districts: Optional list of district names to filter
+        districts: Optional list of district codes or names to filter
         by_village: If True, create one file per village
         single_file: If True, create single combined file
+        queue_db: Optional path to work_queue.db for district code resolution
     """
     data_path = Path(data_dir)
     output_path = Path(output_dir)
@@ -255,9 +356,13 @@ def export_data(
         print(f"No district databases found in {data_dir}")
         return
 
+    # Resolve district filter (supports codes or names)
+    queue_path = Path(queue_db) if queue_db else data_path.parent / "work_queue.db"
+    district_filter, mapping = resolve_district_filter(districts, data_path, queue_path)
+
     print(f"Found {len(db_files)} district databases")
-    if districts:
-        print(f"Filtering to districts: {', '.join(districts)}")
+    if district_filter:
+        print(f"Filtering to districts: {', '.join(district_filter)}")
 
     ext = '.' + fmt
     all_rows = []
@@ -267,7 +372,7 @@ def export_data(
     for db_path in db_files:
         district_name = get_district_name_from_db(db_path)
 
-        if districts and district_name not in districts:
+        if district_filter and district_name not in district_filter:
             continue
 
         print(f"\nProcessing {district_name}...")
@@ -341,11 +446,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # List available districts with their codes
+  uv run python export_data.py --list-districts
+
   # Export all to CSV (one file per district)
   uv run python export_data.py --data-dir bhulekh_data --output-dir export
 
-  # Export specific districts
-  uv run python export_data.py --data-dir bhulekh_data --districts କଟକ ଅନୁଗୋଳ
+  # Export specific districts BY CODE (easier!)
+  uv run python export_data.py --data-dir bhulekh_data --districts 3 11 23
 
   # Export to Excel
   uv run python export_data.py --data-dir bhulekh_data --format xlsx
@@ -371,7 +479,7 @@ Examples:
     )
     parser.add_argument(
         "--districts", nargs='+', default=None,
-        help="Filter to specific district names (Odia text, space-separated)"
+        help="Filter by district CODE (numbers) or name. E.g.: --districts 3 11 or --districts କଟକ"
     )
     parser.add_argument(
         "--by-village", action="store_true",
@@ -381,8 +489,23 @@ Examples:
         "--single-file", action="store_true",
         help="Export all data to a single combined file"
     )
+    parser.add_argument(
+        "--list-districts", action="store_true",
+        help="List available districts with their codes and exit"
+    )
+    parser.add_argument(
+        "--queue-db", default=None,
+        help="Path to work_queue.db for district code resolution (auto-detected if not specified)"
+    )
 
     args = parser.parse_args()
+
+    # Handle --list-districts
+    if args.list_districts:
+        data_path = Path(args.data_dir)
+        queue_path = Path(args.queue_db) if args.queue_db else None
+        list_districts(data_path, queue_path)
+        return
 
     if args.by_village and args.single_file:
         print("ERROR: Cannot use --by-village and --single-file together")
@@ -395,6 +518,7 @@ Examples:
         districts=args.districts,
         by_village=args.by_village,
         single_file=args.single_file,
+        queue_db=args.queue_db,
     )
 
 
