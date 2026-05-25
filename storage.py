@@ -275,14 +275,19 @@ class BhulekhStorage(BhulekhStorageBase):
             );
         """)
         # Add columns to existing tables if they don't exist (migration)
-        try:
-            conn.execute("ALTER TABLE khatiyans ADD COLUMN html_content TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
-            conn.execute("ALTER TABLE khatiyans ADD COLUMN needs_review INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        for col_def in [
+            "ALTER TABLE khatiyans ADD COLUMN html_content TEXT",
+            "ALTER TABLE khatiyans ADD COLUMN needs_review INTEGER DEFAULT 0",
+        ]:
+            try:
+                conn.execute(col_def)
+            except sqlite3.OperationalError as e:
+                err_msg = str(e).lower()
+                if "duplicate column" in err_msg or "already exists" in err_msg:
+                    pass
+                else:
+                    logger.error("Migration failed (%s): %s — data writes will fail!", col_def, e)
+                    raise
         conn.commit()
 
     def update_khatiyan(

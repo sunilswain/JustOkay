@@ -1405,13 +1405,10 @@ class BhulekhScraper:
                 ror_data['khatiyan_text'] = khatiyan_text
                 self._record_layout_stat(ror_data.get('ror_type', 'type1'))
                 
-                # Store data
-                self.data_list.append(ror_data)
-                self.khatiyans_processed += 1
-                # Track for work-queue checkpoint on timeout (use trimmed value for consistent matching)
-                self._last_khatiyan_no = khatiyan_value.strip() if khatiyan_value else khatiyan_value
-                total = len(self.data_list)
-                # Persistent storage: append immediately so no data loss on crash
+                # Persistent storage: append immediately so no data loss on crash.
+                # Do this BEFORE incrementing khatiyans_processed — if storage fails
+                # the count must not increase, otherwise villages get marked "done"
+                # with khatiyans_fetched > 0 but nothing in the DB.
                 if self._current_storage:
                     self._current_storage.append_khatiyan(ror_data, html_content=html_content)
                     self._current_storage.set_checkpoint(
@@ -1425,6 +1422,12 @@ class BhulekhScraper:
                         khatiyan_text,
                         self._current_storage.get_khatiyan_count(),
                     )
+
+                # Only count as processed AFTER storage succeeded
+                self.data_list.append(ror_data)
+                self.khatiyans_processed += 1
+                self._last_khatiyan_no = khatiyan_value.strip() if khatiyan_value else khatiyan_value
+                total = len(self.data_list)
                 logger.info(f"Processed Khatiyan: {khatiyan_text} (Value: {khatiyan_value}) | Records: {total}")
                 # In dry-run/limit mode, save after each record so you see active file changes
                 if self.limit_khatiyans is not None:
@@ -2064,13 +2067,28 @@ class BhulekhScraper:
                     cp_task.cancel()
 
                 kh_done = already_done + self.khatiyans_processed
-                _complete(v_id, kh_done)
-                logger.info(
-                    "Worker %s: completed village %s (%d khatiyans)", worker_id, vil_name, kh_done
-                )
+                expected = village_info.get("khatiyan_count", 0) or 0
+
+                # Guard: don't mark "done" if we saved 0 khatiyans but
+                # the village was expected to have some.  This prevents the
+                # scenario where every append_khatiyan fails (e.g. missing
+                # DB column) yet the village is silently marked complete.
+                if kh_done == 0 and expected > 0:
+                    logger.error(
+                        "Worker %s: village %s expected %d khatiyans but saved 0 — "
+                        "marking as FAILED so it will be retried.",
+                        worker_id, vil_name, expected,
+                    )
+                    _fail(v_id, f"0 khatiyans saved (expected {expected}) — likely storage error")
+                else:
+                    _complete(v_id, kh_done)
+                    logger.info(
+                        "Worker %s: completed village %s (%d khatiyans)", worker_id, vil_name, kh_done
+                    )
+                    village_ok = True
+
                 # Reset per-village counter
                 self.khatiyans_processed = 0
-                village_ok = True
                 _villages_done += 1
 
                 # Periodic browser restart to prevent Chromium memory leaks
