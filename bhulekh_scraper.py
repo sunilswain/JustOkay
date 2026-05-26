@@ -1254,6 +1254,39 @@ class BhulekhScraper:
         await self.select_search_type("Khatiyan")
         await self.human_delay(0.5, 1.0)
 
+    async def _wait_for_khatiyan_dropdown_with_retries(
+        self, village_value: str, village_text: str, tahasil_value: str,
+    ) -> None:
+        """Wait for Khatiyan dropdown; reload and reselect district/tahasil/village between retries."""
+        attempts: List[tuple] = [
+            (25000, False),
+            (30000, True),
+            (45000, True),
+        ]
+        for attempt_idx, (timeout_ms, reload) in enumerate(attempts, start=1):
+            if reload:
+                logger.warning(
+                    "Khatiyan dropdown empty for village %s (attempt %d/%d), reloading page…",
+                    village_text, attempt_idx, len(attempts),
+                )
+                await self.navigate_to_ror_page()
+                await self._reselect_district_tahasil_village(tahasil_value, village_value)
+            else:
+                logger.info(
+                    "Waiting for Khatiyan dropdown to populate (attempt %d/%d, timeout %dms)…",
+                    attempt_idx, len(attempts), timeout_ms,
+                )
+
+            if await self.wait_for_dropdown_populated(
+                SELECTOR_KHATIYAN, min_options=1, timeout_ms=timeout_ms,
+            ):
+                return
+
+        raise Exception(
+            f"Khatiyan dropdown did not populate for village {village_text} "
+            f"after {len(attempts)} attempts"
+        )
+
     async def process_khatiyan(self, khatiyan_value: str, khatiyan_text: str,
                                district: str, tahasil: str, village: str,
                                tahasil_value: str = "", village_value: str = "") -> bool:
@@ -1470,19 +1503,18 @@ class BhulekhScraper:
             # Select village (triggers postback; Khatiyan dropdown will populate)
             await self.select_dropdown(SELECTOR_VILLAGE, village_value)
             
-            # Wait for Khatiyan dropdown to be populated by server
-            logger.info("Waiting for Khatiyan dropdown to populate...")
-            if not await self.wait_for_dropdown_populated(SELECTOR_KHATIYAN, min_options=1, timeout_ms=25000):
-                logger.warning(f"Khatiyan dropdown did not populate for village {village_text}, skipping")
-                return True
+            await self._wait_for_khatiyan_dropdown_with_retries(
+                village_value, village_text, tahasil_value,
+            )
             await self.human_delay(0.2, 0.4)
             
             # Get all Khatiyans
             khatiyan_options = await self.get_dropdown_options(SELECTOR_KHATIYAN)
             
             if not khatiyan_options:
-                logger.warning(f"No Khatiyans found for village: {village_text}")
-                return True  # Continue to next village
+                raise Exception(
+                    f"No Khatiyans found for village {village_text} despite populated dropdown"
+                )
             
             # Resume: skip khatiyans until we're past the checkpoint
             start_index = 0
@@ -1525,7 +1557,7 @@ class BhulekhScraper:
             
         except Exception as e:
             logger.error(f"Error processing village {village_value}: {e}")
-            return False
+            raise
     
     async def process_tahasil(self, tahasil_value: str, tahasil_text: str,
                              district: str, start_village: Optional[str] = None,
@@ -1569,17 +1601,18 @@ class BhulekhScraper:
 
                 # Only pass start_after_khatiyan for the first village when resuming
                 khatiyan_resume = start_after_khatiyan_value if (start_index == 0 and idx == 0) else None
-                success = await self.process_village(
-                    village['value'],
-                    village['text'],
-                    district,
-                    tahasil_text,
-                    tahasil_value=tahasil_value,
-                    start_after_khatiyan_value=khatiyan_resume,
-                )
-                
-                if not success:
-                    logger.warning(f"Failed to process village: {village['text']}")
+                try:
+                    success = await self.process_village(
+                        village['value'],
+                        village['text'],
+                        district,
+                        tahasil_text,
+                        tahasil_value=tahasil_value,
+                        start_after_khatiyan_value=khatiyan_resume,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to process village: {village['text']}: {e}")
+                    success = False
                 if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                     break
                 await self.human_delay(0.5, 1.0)
@@ -2080,6 +2113,13 @@ class BhulekhScraper:
                         worker_id, vil_name, expected,
                     )
                     _fail(v_id, f"0 khatiyans saved (expected {expected}) — likely storage error")
+                elif kh_done == 0 and expected == 0:
+                    logger.info(
+                        "Worker %s: village %s has 0 expected khatiyans, marking done",
+                        worker_id, vil_name,
+                    )
+                    _complete(v_id, 0)
+                    village_ok = True
                 else:
                     _complete(v_id, kh_done)
                     logger.info(
