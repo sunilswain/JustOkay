@@ -86,8 +86,8 @@ def find_village_row(
         return None
 
 
-def reset_villages_in_queue(queue_db: str, village_ids: List[int], priority: int = 999) -> int:
-    """Reset villages from done/error to pending for re-scraping with high priority."""
+def reset_villages_in_queue(queue_db: str, village_ids: List[int]) -> int:
+    """Reset villages from done/error to pending, preserving existing district priority."""
     if not village_ids:
         return 0
     try:
@@ -102,11 +102,10 @@ def reset_villages_in_queue(queue_db: str, village_ids: List[int], priority: int
                     worker_id = NULL,
                     claimed_at = NULL,
                     retries = 0,
-                    error_msg = NULL,
-                    priority = ?
+                    error_msg = NULL
                 WHERE id = ?
                 """,
-                (priority, vid),
+                (vid,),
             )
         conn.commit()
         conn.close()
@@ -145,10 +144,6 @@ def main() -> None:
         "--execute",
         action="store_true",
         help="Reset queue rows and delete bad khatiyans (default is dry run)",
-    )
-    parser.add_argument(
-        "--priority", type=int, default=999,
-        help="Priority to assign to reset villages (default 999 = highest)",
     )
     args = parser.parse_args()
 
@@ -225,7 +220,7 @@ def main() -> None:
             total_deleted += deleted
             print(f"  {district}/{tahasil}/{village}: deleted {deleted} records")
 
-    reset_count = reset_villages_in_queue(args.queue_db, reset_ids, priority=args.priority)
+    reset_count = reset_villages_in_queue(args.queue_db, reset_ids)
 
     print(f"\n{'=' * 60}")
     print("RESET COMPLETE")
