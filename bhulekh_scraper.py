@@ -219,6 +219,13 @@ _SITE_DOWN_EXIT_AFTER = _SITE_DOWN_THRESHOLD + len(_SITE_BACKOFF)
 # Chromium memory leaks from slowly eating all RAM.
 _BROWSER_RESTART_EVERY = 40
 
+# Khatiyan dropdown: consecutive polls with unchanged option count before accepting.
+_DROPDOWN_STABLE_POLLS = 3
+_DROPDOWN_STABLE_INTERVAL_S = 0.5
+
+# Minimum fraction of expected khatiyans that must be saved before marking done.
+_COMPLETION_MIN_FRACTION = 0.5
+
 
 class BhulekhScraper:
     """Main scraper class for Bhulekh website automation."""
@@ -776,6 +783,63 @@ class BhulekhScraper:
             logger.warning(f"Error waiting for dropdown: {e}")
             return False
 
+    async def wait_for_dropdown_stable(
+        self,
+        selector: str,
+        *,
+        expected_count: Optional[int] = None,
+        stable_polls: int = _DROPDOWN_STABLE_POLLS,
+        poll_interval_s: float = _DROPDOWN_STABLE_INTERVAL_S,
+        timeout_ms: int = 20000,
+    ) -> int:
+        """
+        Wait until a dropdown's option count stabilizes or reaches expected_count.
+
+        Stability means the count stays unchanged for `stable_polls` consecutive
+        polls (~poll_interval_s apart).  If expected_count is known, stabilization
+        below that count is not accepted — polling continues until expected_count
+        is reached or timeout.
+        """
+        deadline = time.time() + (timeout_ms / 1000)
+        interval = max(0.05, poll_interval_s * self.delay_scale)
+        last_count: Optional[int] = None
+        stable_streak = 0
+
+        while time.time() < deadline:
+            count = len(await self.get_dropdown_options(selector))
+
+            if expected_count is not None and count >= expected_count:
+                logger.info(
+                    "Dropdown %s reached expected count %d (got %d)",
+                    selector, expected_count, count,
+                )
+                return count
+
+            if last_count is not None and count == last_count:
+                stable_streak += 1
+                if stable_streak >= stable_polls:
+                    if expected_count is None or count >= expected_count:
+                        logger.info(
+                            "Dropdown %s stabilized at %d options",
+                            selector, count,
+                        )
+                        return count
+                    logger.debug(
+                        "Dropdown %s stable at %d but expected %d — continuing",
+                        selector, count, expected_count,
+                    )
+            else:
+                stable_streak = 1 if count > 0 else 0
+                last_count = count
+
+            await asyncio.sleep(interval)
+
+        final_count = len(await self.get_dropdown_options(selector))
+        raise TimeoutError(
+            f"Dropdown {selector} did not stabilize within {timeout_ms}ms "
+            f"(last count: {final_count}, expected: {expected_count})"
+        )
+
     async def get_dropdown_options(self, selector: str) -> List[Dict[str, str]]:
         """Get all options from a dropdown.
         
@@ -1256,6 +1320,7 @@ class BhulekhScraper:
 
     async def _wait_for_khatiyan_dropdown_with_retries(
         self, village_value: str, village_text: str, tahasil_value: str,
+        expected_khatiyan_count: Optional[int] = None,
     ) -> None:
         """Wait for Khatiyan dropdown; reload and reselect district/tahasil/village between retries."""
         attempts: List[tuple] = [
@@ -1266,21 +1331,35 @@ class BhulekhScraper:
         for attempt_idx, (timeout_ms, reload) in enumerate(attempts, start=1):
             if reload:
                 logger.warning(
-                    "Khatiyan dropdown empty for village %s (attempt %d/%d), reloading page…",
+                    "Khatiyan dropdown not ready for village %s (attempt %d/%d), reloading page…",
                     village_text, attempt_idx, len(attempts),
                 )
                 await self.navigate_to_ror_page()
                 await self._reselect_district_tahasil_village(tahasil_value, village_value)
             else:
                 logger.info(
-                    "Waiting for Khatiyan dropdown to populate (attempt %d/%d, timeout %dms)…",
+                    "Waiting for Khatiyan dropdown to stabilize (attempt %d/%d, timeout %dms, expected %s)…",
                     attempt_idx, len(attempts), timeout_ms,
+                    expected_khatiyan_count if expected_khatiyan_count is not None else "unknown",
                 )
 
-            if await self.wait_for_dropdown_populated(
-                SELECTOR_KHATIYAN, min_options=1, timeout_ms=timeout_ms,
-            ):
-                return
+            try:
+                count = await self.wait_for_dropdown_stable(
+                    SELECTOR_KHATIYAN,
+                    expected_count=expected_khatiyan_count,
+                    timeout_ms=timeout_ms,
+                )
+                if count > 0 or expected_khatiyan_count == 0:
+                    return
+                logger.warning(
+                    "Khatiyan dropdown stabilized at 0 options for village %s",
+                    village_text,
+                )
+            except TimeoutError as e:
+                logger.warning(
+                    "Khatiyan dropdown wait timed out for village %s (attempt %d/%d): %s",
+                    village_text, attempt_idx, len(attempts), e,
+                )
 
         raise Exception(
             f"Khatiyan dropdown did not populate for village {village_text} "
@@ -1318,24 +1397,38 @@ class BhulekhScraper:
                     else:
                         raise Exception("Website timeout error persists after all retries")
 
-                # Wait for RoR view content so we don't extract while page is still loading/navigating
+                # Wait for RoR view content — if the RoR page elements never
+                # appear, the "View RoR" click likely didn't navigate away from
+                # the search form.  Extracting from the search form produces an
+                # all-empty record, so we MUST retry instead of proceeding.
                 front_loaded = False
                 try:
-                    await self.page.wait_for_selector("#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack", state="visible", timeout=15000)
+                    await self.page.wait_for_selector(
+                        "#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack",
+                        state="visible", timeout=15000,
+                    )
                     front_loaded = True
                 except Exception as e:
                     logger.warning(f"Front page elements not found after 15s: {e}")
-                    # Check if page has any content at all
-                    try:
-                        body_text = await self.page.locator('body').inner_text()
-                        if len(body_text.strip()) < 100:
-                            # Page is essentially empty - retry
-                            if attempt < max_retries - 1:
-                                logger.warning(f"Page appears empty, retrying (attempt {attempt + 1}/{max_retries})...")
-                                await asyncio.sleep(2)
-                                continue
-                    except:
-                        pass
+
+                if not front_loaded:
+                    if attempt < max_retries - 1:
+                        wait = _KHATIYAN_RETRY_BACKOFF[min(attempt, len(_KHATIYAN_RETRY_BACKOFF) - 1)]
+                        logger.warning(
+                            "RoR page did NOT load for Khatiyan %s (attempt %d/%d) — "
+                            "retrying in %ds with full page reload…",
+                            khatiyan_text, attempt + 1, max_retries, wait,
+                        )
+                        await asyncio.sleep(wait)
+                        await self.navigate_to_ror_page()
+                        await self._reselect_district_tahasil_village(tahasil_value, village_value)
+                        continue
+                    else:
+                        logger.error(
+                            "RoR page never loaded for Khatiyan %s after %d attempts — skipping",
+                            khatiyan_text, max_retries,
+                        )
+                        return False
                 
                 await self.human_delay(0.1, 0.25)
                 
@@ -1437,6 +1530,19 @@ class BhulekhScraper:
                 ror_data['khatiyan_value'] = khatiyan_value
                 ror_data['khatiyan_text'] = khatiyan_text
                 self._record_layout_stat(ror_data.get('ror_type', 'type1'))
+
+                plots = ror_data.get('plots') or []
+                landlord = (ror_data.get('landlord_name') or '').strip()
+                tenant = (ror_data.get('tenant_name') or '').strip()
+                if not plots and not landlord and not tenant:
+                    logger.warning(
+                        "Empty extraction for Khatiyan %s (no plots, landlord, or tenant) — skipping save",
+                        khatiyan_text,
+                    )
+                    await self.click_khatiyan_page()
+                    await self.wait_for_page_load()
+                    await self.human_delay(0.3, 0.6)
+                    return False
                 
                 # Persistent storage: append immediately so no data loss on crash.
                 # Do this BEFORE incrementing khatiyans_processed — if storage fails
@@ -1497,7 +1603,8 @@ class BhulekhScraper:
     async def process_village(self, village_value: str, village_text: str,
                              district: str, tahasil: str,
                              tahasil_value: str = "",
-                             start_after_khatiyan_value: Optional[str] = None) -> bool:
+                             start_after_khatiyan_value: Optional[str] = None,
+                             expected_khatiyan_count: Optional[int] = None) -> bool:
         """Process all Khatiyans in a village."""
         try:
             # Select village (triggers postback; Khatiyan dropdown will populate)
@@ -1505,6 +1612,7 @@ class BhulekhScraper:
             
             await self._wait_for_khatiyan_dropdown_with_retries(
                 village_value, village_text, tahasil_value,
+                expected_khatiyan_count=expected_khatiyan_count,
             )
             await self.human_delay(0.2, 0.4)
             
@@ -2080,6 +2188,7 @@ class BhulekhScraper:
                 cp_task = asyncio.create_task(_checkpoint_loop())
                 try:
                     # Hard per-village timeout — if the site hangs, abort & move on
+                    expected_kh = village_info.get("khatiyan_count") or None
                     await asyncio.wait_for(
                         self.process_village(
                             village_value=vil_code,
@@ -2088,6 +2197,7 @@ class BhulekhScraper:
                             tahasil=tah_name,
                             tahasil_value=tah_code,
                             start_after_khatiyan_value=resume_kh,
+                            expected_khatiyan_count=expected_kh,
                         ),
                         timeout=_VILLAGE_TIMEOUT,
                     )
@@ -2101,11 +2211,10 @@ class BhulekhScraper:
 
                 kh_done = already_done + self.khatiyans_processed
                 expected = village_info.get("khatiyan_count", 0) or 0
+                min_required = int(expected * _COMPLETION_MIN_FRACTION) if expected > 0 else 0
 
-                # Guard: don't mark "done" if we saved 0 khatiyans but
-                # the village was expected to have some.  This prevents the
-                # scenario where every append_khatiyan fails (e.g. missing
-                # DB column) yet the village is silently marked complete.
+                # Guard: don't mark "done" if we saved too few khatiyans relative
+                # to the expected count (catches premature dropdown / empty saves).
                 if kh_done == 0 and expected > 0:
                     logger.error(
                         "Worker %s: village %s expected %d khatiyans but saved 0 — "
@@ -2113,6 +2222,18 @@ class BhulekhScraper:
                         worker_id, vil_name, expected,
                     )
                     _fail(v_id, f"0 khatiyans saved (expected {expected}) — likely storage error")
+                elif expected > 0 and kh_done < min_required:
+                    logger.error(
+                        "Worker %s: village %s saved only %d/%d khatiyans (<%d%% threshold) — "
+                        "marking as FAILED so it will be retried.",
+                        worker_id, vil_name, kh_done, expected,
+                        int(_COMPLETION_MIN_FRACTION * 100),
+                    )
+                    _fail(
+                        v_id,
+                        f"Only {kh_done}/{expected} khatiyans saved "
+                        f"(<{int(_COMPLETION_MIN_FRACTION * 100)}% threshold)",
+                    )
                 elif kh_done == 0 and expected == 0:
                     logger.info(
                         "Worker %s: village %s has 0 expected khatiyans, marking done",
