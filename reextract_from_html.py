@@ -23,6 +23,8 @@ from typing import Dict, List, Optional
 from bs4 import BeautifulSoup
 import re
 
+from http_scraper import parse_ror_html as _http_parse_ror_html
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -32,113 +34,10 @@ logger = logging.getLogger(__name__)
 
 def extract_from_html(html: str) -> Dict:
     """
-    Extract RoR data from raw HTML using BeautifulSoup.
-    This mirrors the JavaScript extraction logic but in Python.
+    Extract RoR data from raw HTML using the shared parse_ror_html logic.
+    Falls back to the http_scraper's parser which handles both Type 1 and Type 2.
     """
-    soup = BeautifulSoup(html, 'html.parser')
-    data = {'plots': []}
-    
-    # Detect RoR type
-    gvfront = soup.find(id='gvfront')
-    if gvfront:
-        data['ror_type'] = 'type1'
-    else:
-        data['ror_type'] = 'type2'
-    
-    # Extract front page data (common fields)
-    front_selectors = {
-        'mouja': ['#gvfront_ctl02_lblMouja', '#gvRorFront_ctl02_lblMouja', '[id*="lblMouja"]'],
-        'tehsil': ['#gvfront_ctl02_lblTehsil', '#gvRorFront_ctl02_lblTehsil', '[id*="lblTehsil"]'],
-        'thana': ['#gvfront_ctl02_lblThana', '#gvRorFront_ctl02_lblThana', '[id*="lblThana"]'],
-        'tehsil_no': ['#gvfront_ctl02_lblTesilNo', '#gvRorFront_ctl02_lblTesilNo', '[id*="lblTesilNo"]'],
-        'thana_no': ['#gvfront_ctl02_lblThanano', '#gvRorFront_ctl02_lblThanano', '[id*="lblThanano"]'],
-        'district': ['#gvfront_ctl02_lblDist', '#gvRorFront_ctl02_lblDist', '[id*="lblDist"]'],
-        'landlord_name': ['#gvfront_ctl02_lblLandlordName', '#gvRorFront_ctl02_lblLandlordName', '[id*="lblLandlordName"]', '[id*="lblBhuswami"]'],
-        'khatiyan_sl_no': ['#gvfront_ctl02_lblKhatiyanslNo', '#gvRorFront_ctl02_lblKhatiyanslNo', '[id*="lblKhatiyanslNo"]'],
-        'tenant_name': ['#gvfront_ctl02_lblName', '#gvRorFront_ctl02_lblName', '[id*="lblName"]', '[id*="lblRaiyat"]'],
-        'status': ['#gvfront_ctl02_lblStatua', '#gvRorFront_ctl02_lblStatua', '[id*="lblStatua"]'],
-        'water_tax': ['#gvfront_ctl02_lblWaterTax', '[id*="lblWaterTax"]'],
-        'tax': ['#gvfront_ctl02_lblTax', '[id*="lblTax"]'],
-        'ses': ['#gvfront_ctl02_lblSes', '[id*="lblSes"]'],
-        'other_ses': ['#gvfront_ctl02_lblOtherses', '[id*="lblOtherses"]'],
-        'total': ['#gvfront_ctl02_lblTotal', '[id*="lblTotal"]'],
-        'description': ['#gvfront_ctl02_lblDescription', '[id*="lblDescription"]'],
-        'special_case': ['#gvfront_ctl02_lblSpecialCase', '[id*="lblSpecialCase"]'],
-        'last_publish_date': ['#gvfront_ctl02_lblLastPublishDate', '[id*="lblLastPublishDate"]'],
-        'tax_date': ['#gvfront_ctl02_lblTaxDate', '[id*="lblTaxDate"]'],
-    }
-    
-    for field, selectors in front_selectors.items():
-        for sel in selectors:
-            elem = soup.select_one(sel)
-            if elem:
-                text = elem.get_text(strip=True)
-                if text:
-                    data[field] = text
-                    break
-    
-    # Extract plots from back page table
-    table_ids = ['gvRorBack', 'gvRorBack2', 'gvRorFrontBack', 'gvplotdetail']
-    table = None
-    for tid in table_ids:
-        table = soup.find(id=tid)
-        if table:
-            break
-    
-    # Fallback: find any table with plot-like content
-    if not table:
-        for t in soup.find_all('table'):
-            if t.find(id=lambda x: x and 'lblPlot' in x):
-                table = t
-                break
-    
-    if table:
-        rows = table.find_all('tr')
-        for row in rows:
-            plot = {}
-            
-            # Plot number - look for specific IDs
-            plot_link = row.select_one('a[id*="lblPlotcni"], a[id*="lblPlotNo"]')
-            plot_span = row.select_one('span[id*="lblPlotcni"], span[id*="lblPlotNo"]')
-            plot_no = ''
-            if plot_link:
-                plot_no = plot_link.get_text(strip=True)
-            elif plot_span:
-                plot_no = plot_span.get_text(strip=True)
-            
-            # Skip if no valid plot number (header rows)
-            if not plot_no or not any(c.isdigit() for c in plot_no):
-                continue
-            
-            plot['plot_no'] = plot_no
-            
-            # Extract other fields
-            field_selectors = {
-                'chaka': ['[id*="lblchaka"]', '[id*="Chaka"]'],
-                'land_type': ['[id*="lblCNItype"]', '[id*="lbllType"]', '[id*="LandType"]'],
-                'kisam': ['[id*="lblKisama"]', '[id*="Kisam"]'],
-                'n_occu': ['[id*="lbln_occu"]', '[id*="n_occu"]'],
-                'e_occu': ['[id*="lble_occu"]', '[id*="e_occu"]'],
-                's_occu': ['[id*="lbls_occu"]', '[id*="s_occu"]'],
-                'w_occu': ['[id*="lblw_occu"]', '[id*="w_occu"]'],
-                'acre': ['[id*="lblAcre"]', '[id*="Acre"]'],
-                'decimil': ['[id*="lblDecimil"]', '[id*="Decimil"]'],
-                'hector': ['[id*="lblHector"]', '[id*="Hector"]'],
-                'remarks': ['[id*="lblPlotRemarks"]', '[id*="Remarks"]'],
-            }
-            
-            for field, selectors in field_selectors.items():
-                for sel in selectors:
-                    elem = row.select_one(sel)
-                    if elem:
-                        plot[field] = elem.get_text(strip=True)
-                        break
-                if field not in plot:
-                    plot[field] = ''
-            
-            data['plots'].append(plot)
-    
-    return data
+    return _http_parse_ror_html(html)
 
 
 def process_database(db_path: Path, needs_review_only: bool = False, dry_run: bool = False) -> Dict:

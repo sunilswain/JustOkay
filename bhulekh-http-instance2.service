@@ -1,0 +1,28 @@
+[Unit]
+Description=Bhulekh HTTP Scraper - Instance 2
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONIOENCODING=utf-8
+WorkingDirectory=/home/ubuntu/justokay
+ExecStart=/home/ubuntu/.local/bin/uv run python http_scraper.py \
+    --workers 50 \
+    --db /home/ubuntu/justokay/work_queue.db \
+    --data-dir /home/ubuntu/justokay/bhulekh_data \
+    --districts 1 2 4 5 6 7 8 11 12 13 14 15 17 18 22 25 28 29 \
+    --request-delay 0.05 \
+    --max-inflight 100
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bhulekh-http
+MemoryMax=8G
+
+[Install]
+WantedBy=multi-user.target
