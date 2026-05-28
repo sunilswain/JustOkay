@@ -20,7 +20,7 @@ import socket
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # ── Remote queue client (used when --queue-url is passed to workers) ──────────
 
@@ -454,11 +454,67 @@ def reclaim_stuck_villages(db_path: str) -> int:
 
 def reset_errors(db_path: str) -> int:
     """Reset all error villages back to pending for a fresh retry."""
+    return reset_errors_for_districts(db_path, district_codes=None)
+
+
+def reset_errors_for_districts(
+    db_path: str,
+    district_codes: Optional[list] = None,
+    *,
+    reset_errors: bool = True,
+    reset_zero_progress_in_progress: bool = False,
+) -> Tuple[int, int]:
+    """
+    Reset error villages to pending (optionally filtered by district).
+
+    If reset_zero_progress_in_progress is True, also release in_progress villages
+    that still have khatiyans_fetched=0 (stuck at 0/N) back to pending.
+
+    Returns (errors_reset, in_progress_reset).
+    """
+    filter_sql = ""
+    params: list = []
+    if district_codes:
+        placeholders = ",".join("?" * len(district_codes))
+        filter_sql = f" AND district_code IN ({placeholders})"
+        params = list(district_codes)
+
+    errors_reset = 0
+    in_progress_reset = 0
+
     with _conn(db_path) as con:
-        cur = con.execute(
-            "UPDATE villages SET status='pending', retries=0 WHERE status='error'"
-        )
-        return cur.rowcount
+        if reset_errors:
+            cur = con.execute(
+                f"""
+                UPDATE villages
+                SET    status = 'pending',
+                       retries = 0,
+                       error_msg = NULL,
+                       worker_id = NULL,
+                       claimed_at = NULL
+                WHERE  status = 'error'
+                {filter_sql}
+                """,
+                params,
+            )
+            errors_reset = cur.rowcount
+
+        if reset_zero_progress_in_progress:
+            cur2 = con.execute(
+                f"""
+                UPDATE villages
+                SET    status = 'pending',
+                       worker_id = NULL,
+                       claimed_at = NULL
+                WHERE  status = 'in_progress'
+                AND    COALESCE(khatiyans_fetched, 0) = 0
+                {filter_sql}
+                """,
+                params,
+            )
+            in_progress_reset = cur2.rowcount
+
+    return errors_reset, in_progress_reset
 
 
 def list_districts(db_path: str) -> list:

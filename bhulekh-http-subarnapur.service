@@ -1,7 +1,6 @@
 [Unit]
-Description=Bhulekh Village Scraper
-After=bhulekh-boot.service network-online.target
-Requires=bhulekh-boot.service
+Description=Bhulekh HTTP Scraper - Subarnapur (district 23)
+After=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
@@ -9,20 +8,24 @@ StartLimitBurst=10
 Type=simple
 User=ubuntu
 Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONIOENCODING=utf-8
 WorkingDirectory=/home/ubuntu/justokay
-ExecStart=/home/ubuntu/.local/bin/uv run python run_village_workers.py \
-    --workers 40 \
+# Run alongside Playwright only if district 23 is REMOVED from bhulekh.service --districts
+ExecStart=/home/ubuntu/.local/bin/uv run python http_scraper.py \
+    --workers 20 \
     --db /home/ubuntu/justokay/work_queue.db \
     --data-dir /home/ubuntu/justokay/bhulekh_data \
-    --headless \
-    --fast \
-    --districts 3 9 10 16 19 20 21 24 26 27 30
+    --districts 23 \
+    --request-delay 0.1 \
+    --max-inflight 40 \
+    --reset-errors \
+    --reset-stuck-zero
 Restart=always
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=bhulekh
-MemoryMax=36G
+SyslogIdentifier=bhulekh-http-23
+MemoryMax=8G
 
 [Install]
 WantedBy=multi-user.target

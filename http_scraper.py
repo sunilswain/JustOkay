@@ -40,6 +40,7 @@ from work_queue import (
     heartbeat,
     make_queue,
     reclaim_stuck_villages,
+    reset_errors_for_districts,
 )
 
 # ── Site constants ────────────────────────────────────────────────────────────
@@ -1246,6 +1247,16 @@ def main() -> None:
         "--limit-khatiyans", type=int, default=None, metavar="N",
         help="Stop each worker after N khatiyans (testing)",
     )
+    parser.add_argument(
+        "--reset-errors",
+        action="store_true",
+        help="Before starting: reset error villages to pending (in --districts if set)",
+    )
+    parser.add_argument(
+        "--reset-stuck-zero",
+        action="store_true",
+        help="Also reset in_progress villages with 0 khatiyans_fetched to pending",
+    )
     args = parser.parse_args()
 
     is_remote = args.db.startswith("http://") or args.db.startswith("https://")
@@ -1261,9 +1272,21 @@ def main() -> None:
         log.error("Queue file not found: %s — run soap_enumerator.py first", args.db)
         sys.exit(1)
     else:
-        stuck = reclaim_stuck_villages(args.db)
-        if stuck:
-            log.info("Reclaimed %d stuck in_progress villages", stuck)
+        if args.reset_errors or args.reset_stuck_zero:
+            n_err, n_stuck = reset_errors_for_districts(
+                args.db,
+                district_codes=args.districts,
+                reset_errors=args.reset_errors,
+                reset_zero_progress_in_progress=args.reset_stuck_zero,
+            )
+            if args.reset_errors:
+                log.info("Reset %d error villages to pending", n_err)
+            if args.reset_stuck_zero:
+                log.info("Reset %d stuck at 0%% in_progress villages to pending", n_stuck)
+        else:
+            stuck = reclaim_stuck_villages(args.db)
+            if stuck:
+                log.info("Reclaimed %d stuck in_progress villages", stuck)
 
     _install_signal_handlers()
 
