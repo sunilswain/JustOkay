@@ -65,6 +65,30 @@ KHATIYAN_VALUE_WIDTH = 30
 
 _PLOT_TABLE_IDS = ["gvRorBack", "gvRorBack2", "gvRorFrontBack", "gvplotdetail"]
 
+_FORM20_PLOT_TABLE_IDS = [
+    "gvRorSettBack", "gvSettPlot", "gvSettPlotDetail", "gvPlotSettle", "gvForm20Back",
+    "gvRorBack", "gvRorBack2", "gvplotdetail",
+]
+
+
+def _is_form20_body(body_text: str) -> bool:
+    if re.search(r"ଫର୍ମ\s*ନଂ\s*[-–]?\s*20(?:\D|$)", body_text):
+        return True
+    if re.search(r"Form\s*(?:No\.?\s*)?20\b", body_text, re.I):
+        return True
+    settlement_markers = (
+        "ସମୀକ୍ଷା ସେଟଲମେଣ୍ଟ",
+        "Special Survey & Settlement",
+        "Survey & Settlement Act",
+        "Odisha Special Survey",
+    )
+    if any(m in body_text for m in settlement_markers):
+        if re.search(r"ଫର୍ମ\s*ନଂ", body_text) and not re.search(
+            r"ଫର୍ମ\s*ନଂ\s*[-–]?\s*99\b", body_text
+        ):
+            return True
+    return False
+
 # ── Tunables ──────────────────────────────────────────────────────────────────
 
 _VILLAGE_TIMEOUT = 1200          # 20 min per village
@@ -117,7 +141,11 @@ def _is_error_page(html: str) -> bool:
 
 
 def _is_ror_content_page(html: str) -> bool:
-    return any(marker in html for marker in ("gvfront", "gvRorFront", "gvRorBack", "SRoRFront_Uni"))
+    if any(marker in html for marker in ("gvfront", "gvRorFront", "gvRorBack", "SRoRFront_Uni")):
+        return True
+    if "lblBhuswami" in html or "lblRaiyat" in html or "gvRorSettBack" in html:
+        return True
+    return _is_form20_body(BeautifulSoup(html, "html.parser").get_text())
 
 
 def extract_all_form_fields(html: str) -> Dict[str, str]:
@@ -205,10 +233,13 @@ def parse_ror_html(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     data: Dict[str, Any] = {"plots": []}
 
-    # Type detection: Form 99 pages have gvfront but also Odia markers
+    # Layout detection: Form-20 before Type-2 (shared Odia markers)
     body_text = soup.get_text()
+    is_form20 = _is_form20_body(body_text)
     type2_markers = ["ପରିଶିଷ୍ଟ", "ଫର୍ମ ନଂ", "ପରିଚ୍ଛେଦ", "ଭୂ-ସ୍ୱାମୀ"]
-    if any(m in body_text for m in type2_markers):
+    if is_form20:
+        data["ror_type"] = "form20"
+    elif any(m in body_text for m in type2_markers):
         data["ror_type"] = "type2"
     elif soup.find(id="gvfront"):
         data["ror_type"] = "type1"
@@ -279,36 +310,49 @@ def parse_ror_html(html: str) -> Dict[str, Any]:
         "tax_date": ['[id*="lblTaxDate"]'],
         "form_no": ['[id*="lblFormNo"]'],
         "parichheda": ['[id*="lblParichheda"]'],
+        "parishista": ['[id*="lblParishista"]'],
     }
 
     for field, selectors in front_selectors.items():
         data[field] = _first_text(soup, selectors)
 
-    # Form 99 / Type-2: extract form_no and parichheda from plain text
-    if not data.get("form_no") or not data.get("parichheda"):
-        m = re.search(r"ଫର୍ମ\s*ନଂ\s*[-–]?\s*(\S+)", body_text)
+    # Header text fallbacks for form_no / parichheda / parishista
+    num_pat = r"(\d+)" if is_form20 else r"(\S+)"
+    if not data.get("form_no") or not data.get("parichheda") or (
+        is_form20 and not data.get("parishista")
+    ):
+        m = re.search(rf"ଫର୍ମ\s*ନଂ\s*[-–]?\s*{num_pat}", body_text)
         if m and not data.get("form_no"):
             data["form_no"] = m.group(1).strip()
-        m = re.search(r"ପରିଚ୍ଛେଦ\s*[-–]?\s*(\S+)", body_text)
+        m = re.search(rf"ପରିଚ୍ଛେଦ\s*[-–]?\s*{num_pat}", body_text)
         if m and not data.get("parichheda"):
             data["parichheda"] = m.group(1).strip()
+        if is_form20:
+            m = re.search(r"ପରିଶିଷ୍ଟ\s*[-–]?\s*(\S+)", body_text)
+            if m and not data.get("parishista"):
+                data["parishista"] = m.group(1).strip()
 
-    # Plot table extraction (mirrors bhulekh_scraper _EXTRACT_PLOTS_JS logic)
+    plot_table_ids = _FORM20_PLOT_TABLE_IDS if is_form20 else _PLOT_TABLE_IDS
     table = None
-    for tid in _PLOT_TABLE_IDS:
+    for tid in plot_table_ids:
         table = soup.find(id=tid)
         if table:
             break
 
     if table is None:
         best_score = 0
+        id_pattern = re.compile(r"Ror|plot|Back|Sett|Form20", re.I) if is_form20 else re.compile(
+            r"Ror|plot|Back", re.I
+        )
         for t in soup.find_all("table", id=True):
             tid = t.get("id", "")
             if tid == "gvfront":
                 continue
-            if not re.search(r"Ror|plot|Back", tid, re.I):
+            if not id_pattern.search(tid):
                 continue
-            score = len(t.select('[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"]'))
+            score = len(
+                t.select('[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"], [id*="lblAcre"]')
+            )
             if score > best_score:
                 best_score = score
                 table = t
@@ -327,6 +371,12 @@ def parse_ror_html(html: str) -> Dict[str, Any]:
                     if val and re.search(r"\d", val):
                         plot_no = val
                         break
+            if not plot_no and is_form20:
+                tds = row.find_all("td")
+                if tds:
+                    first = _cell_text(tds[0])
+                    if re.fullmatch(r"\d+", first.strip()):
+                        plot_no = first.strip()
             if not plot_no:
                 continue
 
@@ -756,15 +806,18 @@ async def fetch_khatiyan_with_retry(
     khatiyan_text: str,
     khatiyan_value: str,
     dropdown_map: Dict[str, str],
-) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Fetch and parse one khatiyan; returns (ror_data, html_for_review)."""
+    village_html: Optional[str] = None,
+) -> Tuple[Dict[str, Any], Optional[str], str]:
+    """Fetch and parse one khatiyan; returns (ror_data, html_for_review, next_village_html)."""
     last_err: Optional[Exception] = None
+    current_village_html = village_html
 
     for attempt in range(_KHATIYAN_RETRIES):
         try:
-            ror_html, _next_html = await session.fetch_ror_for_khatiyan(
+            ror_html, next_html = await session.fetch_ror_for_khatiyan(
                 district_code, tahasil_code, village_code,
                 khatiyan_value, dropdown_map,
+                village_html=current_village_html,
             )
             ror_data = parse_ror_html(ror_html)
 
@@ -779,10 +832,11 @@ async def fetch_khatiyan_with_retry(
             )
 
             html_content = ror_html if _extraction_has_issues(ror_data) else None
-            return ror_data, html_content
+            return ror_data, html_content, next_html
 
         except (SessionError, TimeoutError, httpx.TimeoutException, httpx.NetworkError) as exc:
             last_err = exc
+            current_village_html = None
             wait = _KHATIYAN_BACKOFF[min(attempt, len(_KHATIYAN_BACKOFF) - 1)]
             log.warning(
                 "Khatiyan %r attempt %d/%d failed: %s — retry in %ds",
@@ -791,6 +845,7 @@ async def fetch_khatiyan_with_retry(
             await asyncio.sleep(wait)
         except httpx.HTTPStatusError as exc:
             last_err = exc
+            current_village_html = None
             wait = _KHATIYAN_BACKOFF[min(attempt, len(_KHATIYAN_BACKOFF) - 1)]
             log.warning(
                 "Khatiyan %r HTTP %d attempt %d/%d — retry in %ds",
@@ -869,7 +924,7 @@ async def process_village(
 
     saved = 0
     limit_reached = False
-    page_html = village_html or ""
+    current_village_html = village_html or ""
 
     for text, value in khatiyans[start_idx:]:
         if _shutdown.is_set():
@@ -878,9 +933,11 @@ async def process_village(
             limit_reached = True
             break
 
-        ror_data, html_content = await fetch_khatiyan_with_retry(
+        ror_data, html_content, next_village_html = await fetch_khatiyan_with_retry(
             session, d_str, t_str, v_str, text, value, dropdown_map,
+            village_html=current_village_html if current_village_html else None,
         )
+        current_village_html = next_village_html
 
         ror_data["district"] = d_name
         ror_data["tahasil"] = t_name

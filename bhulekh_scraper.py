@@ -83,6 +83,30 @@ SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, 
 _PLOT_TABLE_IDS = ['gvRorBack', 'gvRorBack2', 'gvRorFrontBack', 'gvplotdetail']
 _NON_PLOT_TABLE_IDS = frozenset({'gvfront'})
 
+# Form-20 / survey-settlement plot tables (separate from Type-1/2 — not in _PLOT_TABLE_IDS)
+_FORM20_PLOT_TABLE_IDS = [
+    'gvRorSettBack', 'gvSettPlot', 'gvSettPlotDetail', 'gvPlotSettle', 'gvForm20Back',
+    'gvRorBack', 'gvRorBack2', 'gvplotdetail',
+]
+
+
+def _is_form20_body(body_text: str) -> bool:
+    """True when page body indicates Form-20 / survey-settlement RoR (not Form-99)."""
+    if re.search(r'ଫର୍ମ\s*ନଂ\s*[-–]?\s*20(?:\D|$)', body_text):
+        return True
+    if re.search(r'Form\s*(?:No\.?\s*)?20\b', body_text, re.I):
+        return True
+    settlement_markers = (
+        'ସମୀକ୍ଷା ସେଟଲମେଣ୍ଟ',
+        'Special Survey & Settlement',
+        'Survey & Settlement Act',
+        'Odisha Special Survey',
+    )
+    if any(m in body_text for m in settlement_markers):
+        if re.search(r'ଫର୍ମ\s*ନଂ', body_text) and not re.search(r'ଫର୍ମ\s*ନଂ\s*[-–]?\s*99\b', body_text):
+            return True
+    return False
+
 # Single JS blob for bulk plot extraction — used by Type-1 and Type-2 paths alike.
 _EXTRACT_PLOTS_JS = """
 () => {
@@ -193,6 +217,149 @@ _EXTRACT_PLOTS_JS = """
     '%NON_PLOT_TABLE_IDS%', json.dumps(list(_NON_PLOT_TABLE_IDS))
 )
 
+# Form-20 plot extraction — extends standard selectors with settlement table IDs
+# and a plain-table fallback when rows lack lblPlotNo spans.
+_EXTRACT_PLOTS_FORM20_JS = """
+() => {
+    const PLOT_TABLE_IDS = %FORM20_PLOT_TABLE_IDS%;
+    const NON_PLOT_TABLE_IDS = new Set(%NON_PLOT_TABLE_IDS%);
+
+    const cellText = (el) => {
+        if (!el) return '';
+        return (el.innerText || el.textContent || '').trim();
+    };
+
+    const getText = (row, patterns) => {
+        if (typeof patterns === 'string') patterns = [patterns];
+        for (const sel of patterns) {
+            const el = row.querySelector(sel);
+            const val = cellText(el);
+            if (val !== '') return val;
+        }
+        return '';
+    };
+
+    const getPlotNo = (row) => {
+        const selectors = [
+            'a[id*="lblPlotcni"]', 'span[id*="lblPlotcni"]',
+            'a[id*="lblPlotNo"]', 'span[id*="lblPlotNo"]',
+            'a[id*="lblPlotci"]', 'span[id*="lblPlotci"]',
+            'span[id*="lblSlNo"]', 'span[id*="lblPlot"]',
+        ];
+        for (const sel of selectors) {
+            const val = cellText(row.querySelector(sel));
+            if (val && /\\d/.test(val)) return val;
+        }
+        const cells = row.querySelectorAll('td, th');
+        if (cells.length >= 2) {
+            const first = cellText(cells[0]);
+            if (/^\\d+$/.test(first)) return first;
+        }
+        return '';
+    };
+
+    const getChaka = (row) => {
+        const direct = getText(row, [
+            'span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="lblchaka"]',
+        ]);
+        if (direct) return direct;
+        const plotci = getText(row, ['a[id*="lblPlotci"]', 'span[id*="lblPlotci"]']);
+        if (!plotci) return '';
+        const m = plotci.match(/^[\\d\\/]+\\s+(.+)$/);
+        return m ? m[1].trim() : plotci;
+    };
+
+    const countPlotMarkers = (root) =>
+        root.querySelectorAll(
+            '[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"], [id*="lblAcre"]'
+        ).length;
+
+    const findPlotTable = () => {
+        for (const tableId of PLOT_TABLE_IDS) {
+            const table = document.getElementById(tableId);
+            if (table) return { table, tableId };
+        }
+        let best = null;
+        let bestScore = 0;
+        for (const table of document.querySelectorAll('table[id]')) {
+            const id = table.id || '';
+            if (NON_PLOT_TABLE_IDS.has(id)) continue;
+            if (!/Ror|plot|Sett|Back|Form20/i.test(id)) continue;
+            const score = countPlotMarkers(table);
+            if (score > bestScore) {
+                bestScore = score;
+                best = { table, tableId: id || 'scored-fallback' };
+            }
+        }
+        if (best) return best;
+        const content = document.getElementById('ContentArea');
+        if (content) {
+            for (const table of content.querySelectorAll('table')) {
+                const score = countPlotMarkers(table);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = { table, tableId: 'ContentArea-table' };
+                }
+            }
+        }
+        return best;
+    };
+
+    const extractFromRows = (rows) => {
+        const results = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const plotNo = getPlotNo(row);
+            if (!plotNo) continue;
+
+            let acre = getText(row, ['span[id*="lblAcre"]', 'span[id*="Acre"]', '[id*="Acre"]']);
+            let decimil = getText(row, ['span[id*="lblDecimil"]', 'span[id*="Decimil"]', '[id*="Decimil"]']);
+            let hector = getText(row, ['span[id*="lblHector"]', 'span[id*="Hector"]', '[id*="Hector"]']);
+            let landType = getText(row, [
+                'span[id*="lblCNItype"]', 'span[id*="lbllType"]',
+                'span[id*="LandType"]', '[id*="CNItype"]', '[id*="lblKisam"]',
+            ]);
+
+            if (!acre && !decimil && !hector) {
+                const nums = Array.from(row.querySelectorAll('td, span'))
+                    .map(cellText)
+                    .filter(v => v && /^\\d+(\\.\\d+)?$/.test(v));
+                if (nums.length >= 3) {
+                    acre = nums[nums.length - 4] || nums[0] || '';
+                    decimil = nums[nums.length - 3] || '';
+                    hector = nums[nums.length - 2] || '';
+                }
+            }
+
+            results.push({
+                plot_no: plotNo,
+                chaka: getChaka(row),
+                land_type: landType,
+                kisam: getText(row, ['span[id*="lblKisama"]', 'span[id*="Kisam"]', '[id*="Kisam"]']),
+                n_occu: getText(row, ['span[id*="lbln_occu"]', '[id*="n_occu"]']),
+                e_occu: getText(row, ['span[id*="lble_occu"]', '[id*="e_occu"]']),
+                s_occu: getText(row, ['span[id*="lbls_occu"]', '[id*="s_occu"]']),
+                w_occu: getText(row, ['span[id*="lblw_occu"]', '[id*="w_occu"]']),
+                acre,
+                decimil,
+                hector,
+                remarks: getText(row, ['span[id*="lblPlotRemarks"]', 'span[id*="Remarks"]', '[id*="Remark"]']),
+            });
+        }
+        return results;
+    };
+
+    const found = findPlotTable();
+    if (!found) return { plots: [], tableId: '', rowCount: 0 };
+
+    const rows = found.table.querySelectorAll('tr');
+    const plots = extractFromRows(rows);
+    return { plots, tableId: found.tableId, rowCount: rows.length };
+}
+""".replace('%FORM20_PLOT_TABLE_IDS%', json.dumps(_FORM20_PLOT_TABLE_IDS)).replace(
+    '%NON_PLOT_TABLE_IDS%', json.dumps(list(_NON_PLOT_TABLE_IDS))
+)
+
 # ── Resilience tunables ────────────────────────────────────────────────────────
 # Per-village hard timeout (seconds).  If a village takes longer than this the
 # worker aborts it (marks failed → will be re-claimed later) and moves on.
@@ -276,19 +443,22 @@ class BhulekhScraper:
         self.delay_scale = delay_scale  # 1.0 = normal; 0.15 = fast (--fast). All human_delay() and fixed sleeps scaled.
         self._current_district_value: Optional[str] = None
         self._current_district_text: Optional[str] = None
-        self.layout_stats: Dict[str, int] = {'type1': 0, 'type2': 0}
+        self.layout_stats: Dict[str, int] = {'type1': 0, 'type2': 0, 'form20': 0}
         
     def _record_layout_stat(self, ror_type: str) -> None:
-        """Track Type-1 vs Type-2 layout counts (session + persistent storage)."""
+        """Track RoR layout counts (session + persistent storage)."""
         key = ror_type if ror_type in self.layout_stats else 'type1'
         self.layout_stats[key] = self.layout_stats.get(key, 0) + 1
         if self._current_storage:
-            self._current_storage.increment_layout_stat(key)
+            # Persistent storage only tracks type1/type2 buckets
+            storage_key = key if key in ('type1', 'type2') else 'type2'
+            self._current_storage.increment_layout_stat(storage_key)
         total = sum(self.layout_stats.values())
         if total % 25 == 0:
             logger.info(
                 f"Layout stats (session): type1={self.layout_stats.get('type1', 0)}, "
-                f"type2={self.layout_stats.get('type2', 0)}"
+                f"type2={self.layout_stats.get('type2', 0)}, "
+                f"form20={self.layout_stats.get('form20', 0)}"
             )
 
     async def _extract_form99_header_fields(self) -> Dict[str, str]:
@@ -302,6 +472,24 @@ class BhulekhScraper:
             m = re.search(r'ପରିଚ୍ଛେଦ\s*[-–]?\s*(\S+)', body)
             if m:
                 fields['parichheda'] = m.group(1).strip()
+        except Exception:
+            pass
+        return fields
+
+    async def _extract_form20_header_fields(self) -> Dict[str, str]:
+        """Parse Form-20 header fields from plain text (parishista, form no, section)."""
+        fields: Dict[str, str] = {'form_no': '', 'parichheda': '', 'parishista': ''}
+        try:
+            body = await self.page.locator('body').inner_text()
+            m = re.search(r'ଫର୍ମ\s*ନଂ\s*[-–]?\s*(\d+)', body)
+            if m:
+                fields['form_no'] = m.group(1).strip()
+            m = re.search(r'ପରିଚ୍ଛେଦ\s*[-–]?\s*(\d+)', body)
+            if m:
+                fields['parichheda'] = m.group(1).strip()
+            m = re.search(r'ପରିଶିଷ୍ଟ\s*[-–]?\s*(\S+)', body)
+            if m:
+                fields['parishista'] = m.group(1).strip()
         except Exception:
             pass
         return fields
@@ -1018,6 +1206,17 @@ class BhulekhScraper:
                 pass
             raise
     
+    async def _is_form20_ror(self) -> bool:
+        """
+        Detect Form-20 RoR layout: survey/settlement format (Subarnapur and similar).
+        Must run before Type-2 detection — Form 20 shares some Odia markers with Form 99.
+        """
+        try:
+            body = await self.page.locator('body').inner_text()
+            return _is_form20_body(body)
+        except Exception:
+            return False
+
     async def _is_type2_ror(self) -> bool:
         """
         Detect Type-2 RoR layout: Form 99 / ପରିଶିଷ୍ଟ pages.
@@ -1030,10 +1229,14 @@ class BhulekhScraper:
     async def extract_ror_data(self) -> Dict:
         """
         Extract data from the RoR page.
-        Automatically detects Type-1 (gvfront GridView) vs Type-2 (ପରିଶିଷ୍ଟ / Form 99)
-        and uses the appropriate extractor.
+        Automatically detects Form-20 (survey/settlement), Type-1 (gvfront GridView),
+        or Type-2 (ପରିଶିଷ୍ଟ / Form 99) and uses the appropriate extractor.
         """
         try:
+            if await self._is_form20_ror():
+                logger.info("Detected Form-20 RoR layout (survey/settlement)")
+                return await self.extract_ror_data_form20()
+
             if await self._is_type2_ror():
                 logger.info("Detected Type-2 RoR layout (ପରିଶିଷ୍ଟ / Form-99)")
                 data = await self.extract_ror_data_type2()
@@ -1168,6 +1371,125 @@ class BhulekhScraper:
                 pass
 
         return data
+
+    async def extract_ror_data_form20(self) -> Dict:
+        """
+        Extract data from Form-20 RoR layout: survey/settlement format.
+
+        Form-20 pages use Odia labels (ଭୂ-ସ୍ୱାମୀ, ରାୟତ) and often omit the standard
+        #gvfront / #gvRorBack structure.  Extraction mirrors Type-2 (selector map +
+        label scan) but uses Form-20 plot table IDs and maps bhuswami/raiyat fields.
+        """
+        data: Dict = {'ror_type': 'form20', 'plots': []}
+
+        alt_map = {
+            'mouja':         ['#gvRorFront_ctl02_lblMouja', '#gvfront_ctl02_lblMouja',
+                              '#ctl00_ContentPlaceHolder1_lblMouja', '[id*="lblMouja"]'],
+            'tehsil':        ['#gvRorFront_ctl02_lblTehsil', '#gvfront_ctl02_lblTehsil',
+                              '#ctl00_ContentPlaceHolder1_lblTehsil', '[id*="lblTehsil"]'],
+            'thana':         ['#gvRorFront_ctl02_lblThana', '#gvfront_ctl02_lblThana',
+                              '#ctl00_ContentPlaceHolder1_lblThana', '[id*="lblThana"]'],
+            'tehsil_no':     ['#gvRorFront_ctl02_lblTesilNo', '#gvfront_ctl02_lblTesilNo',
+                              '[id*="lblTesilNo"]'],
+            'thana_no':      ['#gvRorFront_ctl02_lblThanano', '#gvfront_ctl02_lblThanano',
+                              '[id*="lblThanano"]'],
+            'district':      ['#gvRorFront_ctl02_lblDist', '#gvfront_ctl02_lblDist',
+                              '#ctl00_ContentPlaceHolder1_lblDist', '[id*="lblDist"]'],
+            'landlord_name': ['#gvRorFront_ctl02_lblBhuswami', '#ctl00_ContentPlaceHolder1_lblBhuswami',
+                              '#gvRorFront_ctl02_lblLandlordName', '#gvfront_ctl02_lblLandlordName',
+                              '[id*="lblBhuswami"]', '[id*="lblLandlordName"]'],
+            'khatiyan_sl_no':['#gvRorFront_ctl02_lblKhatiyanslNo', '#gvfront_ctl02_lblKhatiyanslNo',
+                              '[id*="lblKhatiyanslNo"]'],
+            'tenant_name':   ['#gvRorFront_ctl02_lblRaiyat', '#ctl00_ContentPlaceHolder1_lblRaiyat',
+                              '#gvRorFront_ctl02_lblName', '#gvfront_ctl02_lblName',
+                              '[id*="lblRaiyat"]', '[id*="lblName"]'],
+            'form_no':       ['#ctl00_ContentPlaceHolder1_lblFormNo', '[id*="lblFormNo"]'],
+            'parichheda':    ['#ctl00_ContentPlaceHolder1_lblParichheda', '[id*="lblParichheda"]'],
+            'parishista':    ['#ctl00_ContentPlaceHolder1_lblParishista', '[id*="lblParishista"]'],
+        }
+
+        for field, selectors in alt_map.items():
+            for sel in selectors:
+                try:
+                    el = self.page.locator(sel)
+                    if await el.count() > 0:
+                        val = await el.inner_text()
+                        if val.strip():
+                            data[field] = val.strip()
+                            break
+                except Exception:
+                    pass
+            if field not in data:
+                data[field] = ''
+
+        odia_labels = {
+            'ମୌଜା':         'mouja',
+            'ତହସିଲ':        'tehsil',
+            'ଥାନା':         'thana',
+            'ଜିଲ୍ଲା':      'district',
+            'ଭୂ-ସ୍ୱାମୀ':   'landlord_name',
+            'ଖେୱାଟ':        'landlord_name',
+            'ରାୟତ':          'tenant_name',
+            'ରୟତ':          'tenant_name',
+            'ଅଧିବାସୀ':     'tenant_name',
+            'ଫର୍ମ ନଂ':      'form_no',
+            'ପରିଚ୍ଛେଦ':    'parichheda',
+            'ପରିଶିଷ୍ଟ':    'parishista',
+        }
+        if not data.get('mouja') or not data.get('landlord_name'):
+            try:
+                all_cells = await self.page.locator('td').all()
+                for i, cell in enumerate(all_cells[:-1]):
+                    cell_text = (await cell.inner_text()).strip()
+                    for label, field in odia_labels.items():
+                        if label in cell_text and not data.get(field):
+                            try:
+                                next_cells = await self.page.locator('td').nth(i + 1).inner_text()
+                                val = next_cells.strip().lstrip(':：').strip()
+                                if val and val not in odia_labels:
+                                    data[field] = val
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.warning(f"Form-20 label scan failed: {e}")
+
+        form20 = await self._extract_form20_header_fields()
+        for field in ('form_no', 'parichheda', 'parishista'):
+            if form20.get(field) and not data.get(field):
+                data[field] = form20[field]
+
+        data['plots'] = await self.extract_back_page_data_form20()
+
+        filled = sum(1 for v in data.values() if v and v != [] and v != 'form20')
+        logger.info(f"Form-20 extraction: {filled} fields populated, {len(data['plots'])} plots")
+
+        if filled <= 2:
+            try:
+                raw_text = await self.page.locator('body').inner_text()
+                data['raw_page_text'] = raw_text[:3000]
+                logger.warning("Form-20 extraction got nothing; raw page text captured for debugging")
+            except Exception:
+                pass
+
+        return data
+
+    async def extract_back_page_data_form20(self) -> List[Dict]:
+        """Extract plot rows from Form-20 settlement tables."""
+        plots: List[Dict] = []
+        try:
+            result = await self.page.evaluate(_EXTRACT_PLOTS_FORM20_JS)
+            plots = result.get('plots', []) if isinstance(result, dict) else (result or [])
+            table_id = result.get('tableId', '') if isinstance(result, dict) else ''
+            if plots:
+                logger.info(
+                    f"Form-20: extracted {len(plots)} plots"
+                    + (f" (table={table_id})" if table_id else "")
+                )
+            elif await self.page.locator('#gvRorBack, #gvRorBack2, #gvplotdetail').count() > 0:
+                plots = await self.extract_back_page_data()
+        except Exception as e:
+            logger.error(f"Error extracting Form-20 plot data: {e}")
+        return plots
     
     async def extract_front_page_data(self) -> Dict:
         """Extract data from the front page of RoR."""
@@ -1405,12 +1727,21 @@ class BhulekhScraper:
                 front_loaded = False
                 try:
                     await self.page.wait_for_selector(
-                        "#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack",
+                        "#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack, "
+                        "[id*='lblBhuswami'], [id*='lblRaiyat']",
                         state="visible", timeout=15000,
                     )
                     front_loaded = True
                 except Exception as e:
                     logger.warning(f"Front page elements not found after 15s: {e}")
+
+                if not front_loaded:
+                    try:
+                        if await self._is_form20_ror():
+                            front_loaded = True
+                            logger.info("Form-20 RoR layout detected (survey/settlement)")
+                    except Exception:
+                        pass
 
                 if not front_loaded:
                     if attempt < max_retries - 1:
