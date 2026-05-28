@@ -448,6 +448,32 @@ def _is_timeout_page(html: str) -> bool:
     )
 
 
+def _get_submit_button_value(html: str, button_name: str, default: str = "") -> str:
+    """Read the value attribute for a named submit button from the current form."""
+    soup = BeautifulSoup(html, "html.parser")
+    btn = soup.find("input", {"name": button_name})
+    if btn is None:
+        btn = soup.find("input", id=re.compile(re.escape(button_name.split("$")[-1]), re.I))
+    if btn is not None:
+        return (btn.get("value") or default).strip()
+    return default
+
+
+async def _fetch_ror_display_html(session: "BhulekhHttpSession", html: str) -> str:
+    """GET RoR display pages if POST response did not include plot tables."""
+    if _is_ror_content_page(html):
+        return html
+    for path in ("/SRoRFront_Uni.aspx", "/SRoRFront.aspx"):
+        try:
+            r = await session._request("GET", f"{session.base_url}{path}")
+            if _is_ror_content_page(r.text):
+                log.debug("Loaded RoR content via GET %s", path)
+                return r.text
+        except Exception as exc:
+            log.debug("GET %s failed: %s", path, exc)
+    return html
+
+
 def _find_back_page_button(html: str) -> Optional[Tuple[str, str]]:
     """Return (name, value) for a back-page submit button if present."""
     soup = BeautifulSoup(html, "html.parser")
@@ -740,6 +766,7 @@ class BhulekhHttpSession:
         if kh_val not in dropdown_map.values():
             kh_val = _resolve_khatiyan_value(khatiyan_value.strip(), dropdown_map)
 
+        ror_btn_val = _get_submit_button_value(village_html, BTN_ROR_FRONT, "View RoR")
         html = await self.postback(
             village_html,
             event_target="",
@@ -751,10 +778,13 @@ class BhulekhHttpSession:
                 RADIO_SEARCH: "Khatiyan",
             },
             button=BTN_ROR_FRONT,
+            button_value=ror_btn_val,
         )
 
         if _is_timeout_page(html):
             raise TimeoutError("Bhulekh timeout page after View RoR")
+
+        html = await _fetch_ror_display_html(self, html)
 
         data = parse_ror_html(html)
         if not data.get("plots"):
