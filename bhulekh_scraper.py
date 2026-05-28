@@ -817,17 +817,18 @@ class BhulekhScraper:
 
             if last_count is not None and count == last_count:
                 stable_streak += 1
-                if stable_streak >= stable_polls:
-                    if expected_count is None or count >= expected_count:
+                if stable_streak >= stable_polls and count > 0:
+                    if expected_count is not None and count < expected_count:
+                        logger.warning(
+                            "Dropdown %s stabilized at %d options (expected %d) — accepting anyway",
+                            selector, count, expected_count,
+                        )
+                    else:
                         logger.info(
                             "Dropdown %s stabilized at %d options",
                             selector, count,
                         )
-                        return count
-                    logger.debug(
-                        "Dropdown %s stable at %d but expected %d — continuing",
-                        selector, count, expected_count,
-                    )
+                    return count
             else:
                 stable_streak = 1 if count > 0 else 0
                 last_count = count
