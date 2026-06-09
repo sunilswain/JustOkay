@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from bs4 import BeautifulSoup
 
+from ror_parser import is_form20_body, parse_ror_html
 from storage import DEFAULT_DATA_DIR, DEFAULT_STORAGE_BACKEND, create_storage
 from work_queue import (
     DEFAULT_QUEUE_PATH,
@@ -64,32 +65,6 @@ BTN_KHATIYAN_PAGE = "btnKhatiyan"
 
 KHATIYAN_VALUE_WIDTH = 30
 
-_PLOT_TABLE_IDS = ["gvRorBack", "gvRorBack2", "gvRorFrontBack", "gvplotdetail"]
-
-_FORM20_PLOT_TABLE_IDS = [
-    "gvRorSettBack", "gvSettPlot", "gvSettPlotDetail", "gvPlotSettle", "gvForm20Back",
-    "gvRorBack", "gvRorBack2", "gvplotdetail",
-]
-
-
-def _is_form20_body(body_text: str) -> bool:
-    if re.search(r"ଫର୍ମ\s*ନଂ\s*[-–]?\s*20(?:\D|$)", body_text):
-        return True
-    if re.search(r"Form\s*(?:No\.?\s*)?20\b", body_text, re.I):
-        return True
-    settlement_markers = (
-        "ସମୀକ୍ଷା ସେଟଲମେଣ୍ଟ",
-        "Special Survey & Settlement",
-        "Survey & Settlement Act",
-        "Odisha Special Survey",
-    )
-    if any(m in body_text for m in settlement_markers):
-        if re.search(r"ଫର୍ମ\s*ନଂ", body_text) and not re.search(
-            r"ଫର୍ମ\s*ନଂ\s*[-–]?\s*99\b", body_text
-        ):
-            return True
-    return False
-
 # ── Tunables ──────────────────────────────────────────────────────────────────
 
 _VILLAGE_TIMEOUT = 1200          # 20 min per village
@@ -98,7 +73,7 @@ _KHATIYAN_BACKOFF = [2, 5, 15, 45]
 _SITE_BACKOFF = [10, 30, 60, 120, 300]
 _DEFAULT_REQUEST_DELAY = 0.15    # seconds between HTTP calls per worker
 _DEFAULT_MAX_INFLIGHT = 20       # global concurrent HTTP requests
-_COMPLETION_MIN_FRACTION = 0.5   # min fraction of expected khatiyans before marking done
+_COMPLETION_MIN_FRACTION = 0.8   # min fraction of expected khatiyans before marking done (override via CLI)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -146,7 +121,7 @@ def _is_ror_content_page(html: str) -> bool:
         return True
     if "lblBhuswami" in html or "lblRaiyat" in html or "gvRorSettBack" in html:
         return True
-    return _is_form20_body(BeautifulSoup(html, "html.parser").get_text())
+    return is_form20_body(BeautifulSoup(html, "html.parser").get_text())
 
 
 def extract_all_form_fields(html: str) -> Dict[str, str]:
@@ -181,32 +156,6 @@ def _strip_button_fields(fields: Dict[str, str], keep: Optional[str] = None) -> 
             del fields[key]
 
 
-def _cell_text(elem) -> str:
-    if elem is None:
-        return ""
-    return (elem.get_text() or "").strip()
-
-
-def _first_text(soup: BeautifulSoup, selectors: List[str]) -> str:
-    for sel in selectors:
-        el = soup.select_one(sel)
-        if el:
-            text = _cell_text(el)
-            if text:
-                return text
-    return ""
-
-
-def _first_text_in_row(row, selectors: List[str]) -> str:
-    for sel in selectors:
-        el = row.select_one(sel)
-        if el:
-            text = _cell_text(el)
-            if text:
-                return text
-    return ""
-
-
 def parse_khatiyan_dropdown(html: str) -> Dict[str, str]:
     """Map khatiyan display text → padded ddlBindData value."""
     soup = BeautifulSoup(html, "html.parser")
@@ -225,195 +174,6 @@ def parse_khatiyan_dropdown(html: str) -> Dict[str, str]:
         mapping[text] = value
         mapping[value.strip()] = value
     return mapping
-
-
-def parse_ror_html(html: str) -> Dict[str, Any]:
-    """
-    Parse RoR front + back page HTML into the same dict shape as bhulekh_scraper.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    data: Dict[str, Any] = {"plots": []}
-
-    # Layout detection: Form-20 before Type-2 (shared Odia markers)
-    body_text = soup.get_text()
-    is_form20 = _is_form20_body(body_text)
-    type2_markers = ["ପରିଶିଷ୍ଟ", "ଫର୍ମ ନଂ", "ପରିଚ୍ଛେଦ", "ଭୂ-ସ୍ୱାମୀ"]
-    if is_form20:
-        data["ror_type"] = "form20"
-    elif any(m in body_text for m in type2_markers):
-        data["ror_type"] = "type2"
-    elif soup.find(id="gvfront"):
-        data["ror_type"] = "type1"
-    else:
-        data["ror_type"] = "type2"
-
-    front_selectors = {
-        "mouja": [
-            "#gvfront_ctl02_lblMouja",
-            "#gvRorFront_ctl02_lblMouja",
-            '[id*="lblMouja"]',
-        ],
-        "tehsil": [
-            "#gvfront_ctl02_lblTehsil",
-            "#gvRorFront_ctl02_lblTehsil",
-            '[id*="lblTehsil"]',
-        ],
-        "thana": [
-            "#gvfront_ctl02_lblThana",
-            "#gvRorFront_ctl02_lblThana",
-            '[id*="lblThana"]',
-        ],
-        "tehsil_no": [
-            "#gvfront_ctl02_lblTesilNo",
-            "#gvRorFront_ctl02_lblTesilNo",
-            '[id*="lblTesilNo"]',
-        ],
-        "thana_no": [
-            "#gvfront_ctl02_lblThanano",
-            "#gvRorFront_ctl02_lblThanano",
-            '[id*="lblThanano"]',
-        ],
-        "district": [
-            "#gvfront_ctl02_lblDist",
-            "#gvRorFront_ctl02_lblDist",
-            '[id*="lblDist"]',
-        ],
-        "landlord_name": [
-            "#gvfront_ctl02_lblLandlordName",
-            "#gvRorFront_ctl02_lblLandlordName",
-            '[id*="lblLandlordName"]',
-            '[id*="lblBhuswami"]',
-        ],
-        "khatiyan_sl_no": [
-            "#gvfront_ctl02_lblKhatiyanslNo",
-            "#gvRorFront_ctl02_lblKhatiyanslNo",
-            '[id*="lblKhatiyanslNo"]',
-        ],
-        "tenant_name": [
-            "#gvfront_ctl02_lblName",
-            "#gvRorFront_ctl02_lblName",
-            '[id*="lblName"]',
-            '[id*="lblRaiyat"]',
-        ],
-        "status": [
-            "#gvfront_ctl02_lblStatua",
-            "#gvRorFront_ctl02_lblStatua",
-            '[id*="lblStatua"]',
-        ],
-        "water_tax": ['[id*="lblWaterTax"]'],
-        "tax": ['[id*="lblTax"]'],
-        "ses": ['[id*="lblSes"]'],
-        "other_ses": ['[id*="lblOtherses"]'],
-        "total": ['[id*="lblTotal"]'],
-        "description": ['[id*="lblDescription"]'],
-        "special_case": ['[id*="lblSpecialCase"]'],
-        "last_publish_date": ['[id*="lblLastPublishDate"]'],
-        "tax_date": ['[id*="lblTaxDate"]'],
-        "form_no": ['[id*="lblFormNo"]'],
-        "parichheda": ['[id*="lblParichheda"]'],
-        "parishista": ['[id*="lblParishista"]'],
-    }
-
-    for field, selectors in front_selectors.items():
-        data[field] = _first_text(soup, selectors)
-
-    # Header text fallbacks for form_no / parichheda / parishista
-    num_pat = r"(\d+)" if is_form20 else r"(\S+)"
-    if not data.get("form_no") or not data.get("parichheda") or (
-        is_form20 and not data.get("parishista")
-    ):
-        m = re.search(rf"ଫର୍ମ\s*ନଂ\s*[-–]?\s*{num_pat}", body_text)
-        if m and not data.get("form_no"):
-            data["form_no"] = m.group(1).strip()
-        m = re.search(rf"ପରିଚ୍ଛେଦ\s*[-–]?\s*{num_pat}", body_text)
-        if m and not data.get("parichheda"):
-            data["parichheda"] = m.group(1).strip()
-        if is_form20:
-            m = re.search(r"ପରିଶିଷ୍ଟ\s*[-–]?\s*(\S+)", body_text)
-            if m and not data.get("parishista"):
-                data["parishista"] = m.group(1).strip()
-
-    plot_table_ids = _FORM20_PLOT_TABLE_IDS if is_form20 else _PLOT_TABLE_IDS
-    table = None
-    for tid in plot_table_ids:
-        table = soup.find(id=tid)
-        if table:
-            break
-
-    if table is None:
-        best_score = 0
-        id_pattern = re.compile(r"Ror|plot|Back|Sett|Form20", re.I) if is_form20 else re.compile(
-            r"Ror|plot|Back", re.I
-        )
-        for t in soup.find_all("table", id=True):
-            tid = t.get("id", "")
-            if tid == "gvfront":
-                continue
-            if not id_pattern.search(tid):
-                continue
-            score = len(
-                t.select('[id*="lblPlotNo"], [id*="lblPlotcni"], [id*="lblPlotci"], [id*="lblAcre"]')
-            )
-            if score > best_score:
-                best_score = score
-                table = t
-
-    if table:
-        for row in table.find_all("tr"):
-            plot_no = ""
-            for sel in (
-                'a[id*="lblPlotcni"]', 'span[id*="lblPlotcni"]',
-                'a[id*="lblPlotNo"]', 'span[id*="lblPlotNo"]',
-                'a[id*="lblPlotci"]', 'span[id*="lblPlotci"]',
-            ):
-                el = row.select_one(sel)
-                if el:
-                    val = _cell_text(el)
-                    if val and re.search(r"\d", val):
-                        plot_no = val
-                        break
-            if not plot_no and is_form20:
-                tds = row.find_all("td")
-                if tds:
-                    first = _cell_text(tds[0])
-                    if re.fullmatch(r"\d+", first.strip()):
-                        plot_no = first.strip()
-            if not plot_no:
-                continue
-
-            plot: Dict[str, str] = {"plot_no": plot_no}
-
-            chaka = _first_text_in_row(
-                row,
-                ['span[id*="lblchaka"]', 'span[id*="Chaka"]', '[id*="lblchaka"]'],
-            )
-            if not chaka:
-                plotci = _first_text_in_row(
-                    row, ['a[id*="lblPlotci"]', 'span[id*="lblPlotci"]']
-                )
-                if plotci:
-                    m = re.match(r"^[\d/]+\s+(.+)$", plotci)
-                    chaka = m.group(1).strip() if m else plotci
-            plot["chaka"] = chaka
-
-            plot_fields = {
-                "land_type": ['span[id*="lblCNItype"]', 'span[id*="lbllType"]', '[id*="CNItype"]'],
-                "kisam": ['span[id*="lblKisama"]', '[id*="Kisam"]'],
-                "n_occu": ['span[id*="lbln_occu"]', '[id*="n_occu"]'],
-                "e_occu": ['span[id*="lble_occu"]', '[id*="e_occu"]'],
-                "s_occu": ['span[id*="lbls_occu"]', '[id*="s_occu"]'],
-                "w_occu": ['span[id*="lblw_occu"]', '[id*="w_occu"]'],
-                "acre": ['span[id*="lblAcre"]', '[id*="Acre"]'],
-                "decimil": ['span[id*="lblDecimil"]', '[id*="Decimil"]'],
-                "hector": ['span[id*="lblHector"]', '[id*="Hector"]'],
-                "remarks": ['span[id*="lblPlotRemarks"]', '[id*="Remark"]'],
-            }
-            for field, selectors in plot_fields.items():
-                plot[field] = _first_text_in_row(row, selectors)
-
-            data["plots"].append(plot)
-
-    return data
 
 
 def _is_session_error(html: str, status_code: int) -> bool:
@@ -953,9 +713,29 @@ async def process_village(
                 )
                 break
 
+    # Skip khatiyans already in storage (prevents duplicates on re-runs)
+    existing_kh = set()
+    if hasattr(storage, "get_existing_khatiyans"):
+        existing_kh = storage.get_existing_khatiyans(t_name, v_name)
+        if existing_kh:
+            log.info(
+                "Village %s: %d khatiyans already in DB, will skip them",
+                v_name, len(existing_kh),
+            )
+
     saved = 0
+    skipped_existing = 0
+    failed_khatiyans = []
     limit_reached = False
     current_village_html = village_html or ""
+    consecutive_errors = 0
+    _MAX_CONSECUTIVE_ERRORS = 5
+    _SESSION_RESETS_ALLOWED = 3
+    session_resets_done = 0
+
+    # Base count = known khatiyans already in DB (from storage, not work_queue)
+    # This avoids double-counting when already_done != len(existing_kh)
+    base_count = max(already_done, len(existing_kh))
 
     for text, value in khatiyans[start_idx:]:
         if _shutdown.is_set():
@@ -964,31 +744,80 @@ async def process_village(
             limit_reached = True
             break
 
-        ror_data, html_content, next_village_html = await fetch_khatiyan_with_retry(
-            session, d_str, t_str, v_str, text, value, dropdown_map,
-            village_html=current_village_html if current_village_html else None,
-        )
-        current_village_html = next_village_html
+        if value in existing_kh:
+            skipped_existing += 1
+            continue
 
-        ror_data["district"] = d_name
-        ror_data["tahasil"] = t_name
-        ror_data["village"] = v_name
-        ror_data["khatiyan_value"] = value
-        ror_data["khatiyan_text"] = text
+        try:
+            ror_data, html_content, next_village_html = await fetch_khatiyan_with_retry(
+                session, d_str, t_str, v_str, text, value, dropdown_map,
+                village_html=current_village_html if current_village_html else None,
+            )
+            current_village_html = next_village_html
+            consecutive_errors = 0
 
-        storage.append_khatiyan(ror_data, html_content=html_content)
-        storage.increment_layout_stat(ror_data.get("ror_type", "type1"))
-        storage.set_checkpoint(
-            d_str, d_name, t_str, t_name, v_str, v_name,
-            value, text, already_done + saved + 1,
-        )
+            ror_data["district"] = d_name
+            ror_data["tahasil"] = t_name
+            ror_data["village"] = v_name
+            ror_data["khatiyan_value"] = value
+            ror_data["khatiyan_text"] = text
 
-        saved += 1
-        on_progress(already_done + saved, value.strip() if value else value)
+            storage.append_khatiyan(ror_data, html_content=html_content)
+            storage.increment_layout_stat(ror_data.get("ror_type", "type1"))
+            saved += 1
 
-        log.info(
-            "Saved khatiyan %r (%d plots) | village %s | total this run %d",
-            text, len(ror_data.get("plots") or []), v_name, saved,
+            total_now = base_count + saved
+            storage.set_checkpoint(
+                d_str, d_name, t_str, t_name, v_str, v_name,
+                value, text, total_now,
+            )
+            on_progress(total_now, value.strip() if value else value)
+
+            log.info(
+                "Saved khatiyan %r (%d plots) | village %s | progress %d/%d",
+                text, len(ror_data.get("plots") or []), v_name, total_now,
+                len(khatiyans),
+            )
+
+        except (RuntimeError, Exception) as exc:
+            consecutive_errors += 1
+            failed_khatiyans.append(text)
+            log.warning(
+                "Khatiyan %r failed in village %s: %s (consecutive errors: %d)",
+                text, v_name, exc, consecutive_errors,
+            )
+
+            if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                if session_resets_done < _SESSION_RESETS_ALLOWED:
+                    session_resets_done += 1
+                    log.warning(
+                        "Village %s: %d consecutive errors — resetting session (reset %d/%d)",
+                        v_name, consecutive_errors, session_resets_done, _SESSION_RESETS_ALLOWED,
+                    )
+                    try:
+                        current_village_html, dropdown_map = await session.navigate_to_village(
+                            d_str, t_str, v_str
+                        )
+                        consecutive_errors = 0
+                        log.info("Session reset successful for village %s", v_name)
+                    except Exception as nav_exc:
+                        log.error(
+                            "Session reset FAILED for village %s: %s — aborting remaining",
+                            v_name, nav_exc,
+                        )
+                        break
+                else:
+                    log.error(
+                        "Village %s: exhausted %d session resets with %d consecutive errors — "
+                        "aborting remaining khatiyans",
+                        v_name, _SESSION_RESETS_ALLOWED, consecutive_errors,
+                    )
+                    break
+
+    if failed_khatiyans:
+        log.warning(
+            "Village %s: %d khatiyans failed out of %d attempted (skipped %d existing)",
+            v_name, len(failed_khatiyans), len(khatiyans) - start_idx - skipped_existing, skipped_existing,
         )
 
     return saved, limit_reached
@@ -1116,25 +945,33 @@ async def worker_loop(
                     timeout=_VILLAGE_TIMEOUT,
                 )
 
-                kh_done = already_done + khatiyans_saved
+                # khatiyans_saved = only NEWLY fetched this run (excludes pre-existing)
+                # Actual total in DB = existing + newly saved
+                if hasattr(storage, 'get_existing_khatiyans'):
+                    actual_in_db = len(storage.get_existing_khatiyans(
+                        village_info["tahasil_name"], vil_name))
+                else:
+                    actual_in_db = already_done + khatiyans_saved
+                kh_done = actual_in_db
+
                 expected = village_info.get("khatiyan_count", 0) or 0
                 min_required = int(expected * _COMPLETION_MIN_FRACTION) if expected > 0 else 0
 
                 if kh_done == 0 and expected > 0 and not _shutdown.is_set():
                     _fail(v_id, f"0 khatiyans saved (expected {expected})")
                 elif expected > 0 and kh_done < min_required and not _shutdown.is_set():
+                    _fail(v_id, f"Only {kh_done}/{expected} khatiyans (<{int(_COMPLETION_MIN_FRACTION * 100)}% threshold, need {min_required})")
                     log.error(
-                        "Worker %s: village %s saved only %d/%d khatiyans (<%d%% threshold) — "
-                        "marking as FAILED so it will be retried.",
+                        "Worker %s: village %s has only %d/%d khatiyans (<%d%% threshold) — "
+                        "FAILED, will retry. New this run: %d.",
                         worker_id, vil_name, kh_done, expected,
-                        int(_COMPLETION_MIN_FRACTION * 100),
+                        int(_COMPLETION_MIN_FRACTION * 100), khatiyans_saved,
                     )
-                    _fail(v_id, f"Only {kh_done}/{expected} khatiyans saved (<{int(_COMPLETION_MIN_FRACTION * 100)}% threshold)")
                 else:
                     _complete(v_id, kh_done)
                     log.info(
-                        "Worker %s: completed village %s (%d khatiyans total)",
-                        worker_id, vil_name, kh_done,
+                        "Worker %s: completed village %s (%d khatiyans total, %d new this run)",
+                        worker_id, vil_name, kh_done, khatiyans_saved,
                     )
                     village_ok = True
                     villages_done += 1
@@ -1287,7 +1124,14 @@ def main() -> None:
         action="store_true",
         help="Also reset in_progress villages with 0 khatiyans_fetched to pending",
     )
+    parser.add_argument(
+        "--completion-min-fraction", type=float, default=0.8, metavar="F",
+        help="Min fraction of expected khatiyans before marking village done (default: 0.8; use 1.0 for verifier)",
+    )
     args = parser.parse_args()
+
+    global _COMPLETION_MIN_FRACTION
+    _COMPLETION_MIN_FRACTION = max(0.0, min(1.0, args.completion_min_fraction))
 
     is_remote = args.db.startswith("http://") or args.db.startswith("https://")
     if is_remote:
@@ -1321,8 +1165,9 @@ def main() -> None:
     _install_signal_handlers()
 
     log.info(
-        "Starting %d HTTP workers | districts=%s | queue=%s | data_dir=%s",
+        "Starting %d HTTP workers | districts=%s | queue=%s | data_dir=%s | min_complete=%.0f%%",
         args.workers, args.districts or "all", args.db, args.data_dir,
+        _COMPLETION_MIN_FRACTION * 100,
     )
 
     t0 = time.time()

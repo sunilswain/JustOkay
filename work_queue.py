@@ -288,6 +288,32 @@ def checkpoint_village(
         """, (khatiyans_fetched, last_khatiyan_no, _now(), village_id))
 
 
+def requeue_district_for_verifier(db_path: str, district_code: int) -> int:
+    """
+    Reset all non-pending villages in a district back to pending.
+
+    Used when the Playwright verifier takes over — existing DB rows are kept,
+    but every village is re-processed until 100% khatiyan coverage.
+    """
+    with _conn(db_path) as con:
+        cur = con.execute(
+            """
+            UPDATE villages
+            SET    status = 'pending',
+                   worker_id = NULL,
+                   claimed_at = NULL,
+                   started_at = NULL,
+                   completed_at = NULL,
+                   retries = 0,
+                   last_khatiyan_no = NULL
+            WHERE  district_code = ?
+            AND    status IN ('done', 'error', 'in_progress')
+            """,
+            (district_code,),
+        )
+        return cur.rowcount
+
+
 def complete_village(db_path: str, village_id: int, khatiyans_fetched: int) -> None:
     """Mark a village as fully done."""
     with _conn(db_path) as con:
@@ -326,7 +352,10 @@ def fail_village(db_path: str, village_id: int, error_msg: str) -> None:
         # Progress checkpoint means the village was partially done — resume, don't count as failure.
         made_progress = (kh_fetched or 0) > 0 and last_kh
 
-        if is_timeout or made_progress:
+        # Threshold failures with progress still consume retry budget (max 5 attempts)
+        is_threshold_fail = "threshold" in error_msg.lower()
+
+        if is_timeout or (made_progress and not is_threshold_fail):
             con.execute("""
                 UPDATE villages
                 SET    status     = 'pending',
