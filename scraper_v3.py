@@ -43,11 +43,19 @@ from storage import DEFAULT_DATA_DIR
 PROGRESS_DIR = "progress"
 VILLAGES_FILE = "villages.json"
 
-# District processing order: near-complete first, then smallest remaining.
-# Sambalpur (12) is 100% done and excluded from scraping.
+# Districts to SKIP (already scraped or being scraped locally):
+# 12=Sambalpur(done), 28=Boudh, 29=Deogarh, 30=Jharsuguda, 25=Malkangiri,
+# 17=Jagatsinghpur, 4=Dhenkanal, 23=Subarnapur, 21=Nuapada, 10=Kandhamal(local),
+# 27=Rayagada, 22=Nayagarh
+SKIP_DISTRICTS = {12, 28, 29, 30, 25, 17, 4, 23, 21, 10, 27, 22}
+
+# Also skip Cuttack tahasil (code=4) within Cuttack district (code=3)
+SKIP_TAHASILS = {(3, 4)}  # (district_code, tahasil_code)
+
+# Priority order: Gajapati first, then near-complete, then remaining by size
 DISTRICT_PRIORITY = [
-    10, 23, 3, 9, 21, 16, 26, 20, 27, 30, 24, 19, 29, 25,
-    15, 28, 4, 17, 22, 11, 13, 2, 18, 14, 8, 7, 6, 1, 5,
+    24, 3, 9, 16, 26, 20, 19,
+    15, 11, 13, 2, 18, 14, 8, 7, 6, 1, 5,
 ]
 _DISTRICT_PRIORITY_INDEX = {code: i for i, code in enumerate(DISTRICT_PRIORITY)}
 
@@ -164,8 +172,13 @@ def _worker_main(
 
     async def _run():
         villages = load_villages(villages_file)
-        # Filter to assigned districts, then sort by district priority
-        my_villages = [v for v in villages if v["district_code"] in district_codes]
+        # Filter to assigned districts, exclude skipped districts/tahasils
+        my_villages = [
+            v for v in villages
+            if v["district_code"] in district_codes
+            and v["district_code"] not in SKIP_DISTRICTS
+            and (v["district_code"], v["tahasil_code"]) not in SKIP_TAHASILS
+        ]
         my_villages.sort(
             key=lambda v: _DISTRICT_PRIORITY_INDEX.get(v["district_code"], len(DISTRICT_PRIORITY))
         )
