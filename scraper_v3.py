@@ -43,6 +43,14 @@ from storage import DEFAULT_DATA_DIR
 PROGRESS_DIR = "progress"
 VILLAGES_FILE = "villages.json"
 
+# District processing order: near-complete first, then smallest remaining.
+# Sambalpur (12) is 100% done and excluded from scraping.
+DISTRICT_PRIORITY = [
+    10, 23, 3, 9, 21, 16, 26, 20, 27, 30, 24, 19, 29, 25,
+    15, 28, 4, 17, 22, 11, 13, 2, 18, 14, 8, 7, 6, 1, 5,
+]
+_DISTRICT_PRIORITY_INDEX = {code: i for i, code in enumerate(DISTRICT_PRIORITY)}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(processName)s] %(message)s",
@@ -156,8 +164,11 @@ def _worker_main(
 
     async def _run():
         villages = load_villages(villages_file)
-        # Filter to assigned districts
+        # Filter to assigned districts, then sort by district priority
         my_villages = [v for v in villages if v["district_code"] in district_codes]
+        my_villages.sort(
+            key=lambda v: _DISTRICT_PRIORITY_INDEX.get(v["district_code"], len(DISTRICT_PRIORITY))
+        )
 
         scraper = BhulekhScraper(
             base_url=base_url,
