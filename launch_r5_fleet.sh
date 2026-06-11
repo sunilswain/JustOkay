@@ -74,7 +74,7 @@ echo ""
 echo "[1/9] Installing system packages..."
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq git curl unzip sqlite3 awscli
+sudo apt-get install -y -qq git curl unzip sqlite3
 
 # Hostname
 sudo hostnamectl set-hostname "$INSTANCE_NAME"
