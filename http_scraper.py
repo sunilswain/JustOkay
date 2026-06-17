@@ -70,7 +70,7 @@ KHATIYAN_VALUE_WIDTH = 30
 _VILLAGE_TIMEOUT = 1200          # 20 min per village
 _KHATIYAN_RETRIES = 4
 _KHATIYAN_BACKOFF = [2, 5, 15, 45]
-_SITE_BACKOFF = [10, 30, 60, 120, 300]
+_SITE_BACKOFF = [5, 10, 20, 40, 60]
 _DEFAULT_REQUEST_DELAY = 0.15    # seconds between HTTP calls per worker
 _DEFAULT_MAX_INFLIGHT = 20       # global concurrent HTTP requests
 _COMPLETION_MIN_FRACTION = 0.8   # min fraction of expected khatiyans before marking done (override via CLI)
@@ -957,8 +957,25 @@ async def worker_loop(
                 expected = village_info.get("khatiyan_count", 0) or 0
                 min_required = int(expected * _COMPLETION_MIN_FRACTION) if expected > 0 else 0
 
+                # Accept as done if: no new progress AND already close (within 5 or 98%)
+                _close_enough = (
+                    expected > 0
+                    and kh_done > 0
+                    and khatiyans_saved == 0
+                    and (kh_done >= expected - 5 or kh_done >= expected * 0.98)
+                )
+
                 if kh_done == 0 and expected > 0 and not _shutdown.is_set():
                     _fail(v_id, f"0 khatiyans saved (expected {expected})")
+                elif _close_enough:
+                    _complete(v_id, kh_done)
+                    log.info(
+                        "Worker %s: accepting village %s as done (%d/%d khatiyans, "
+                        "no new progress — remaining likely don't exist on server)",
+                        worker_id, vil_name, kh_done, expected,
+                    )
+                    village_ok = True
+                    villages_done += 1
                 elif expected > 0 and kh_done < min_required and not _shutdown.is_set():
                     _fail(v_id, f"Only {kh_done}/{expected} khatiyans (<{int(_COMPLETION_MIN_FRACTION * 100)}% threshold, need {min_required})")
                     log.error(

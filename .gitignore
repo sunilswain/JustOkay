@@ -6,7 +6,9 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
+Lib/
 build/
 develop-eggs/
 dist/
@@ -22,15 +24,32 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+pyvenv.cfg
+.python-version
+uv.lock
+
+# Virtual environment scripts (Windows & Unix)
+Scripts/activate*
+Scripts/deactivate*
+Scripts/pydoc*
+Scripts/python*
 
 # Data files
-*.json
 *.csv
 *.xlsx
 *.xls
+bhulekh_data/
+exports/
 
-# Logs
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and output
 *.log
+*.txt
+*.ndjson
 
 # IDE
 .vscode/
@@ -43,28 +62,28 @@ wheels/
 .DS_Store
 Thumbs.db
 
-# Playwright
+# Playwright / browser
 .playwright/
 browser_data/
+scraper/.chrome-worker-*/
+scraper/node_modules/
 
-# Scraped data (large; transfer separately)
-bhulekh_data/
-*.ndjson
+# Sensitive / credentials
+*.pem
+*.key
+*.env
 
-# Database files - NEVER track these (runtime data, different per machine)
-*.db
-*.db-shm
-*.db-wal
-# work_queue.db must NOT be tracked - each instance has its own queue state
+# PyInstaller
+bundle/
+*.spec
 
-# Exports / verification
-bhulekh_all.csv
-bhulekh_all.tsv
-verify_sample.csv
-*_export.csv
+# PDFs and binary docs
+*.pdf
 
-# Logs
-*.log
+# Temporary / diagnostic scripts (one-off)
+_*.py
+_*.sh
+_*.txt
 
 # Probe / debug artifacts
 probe_*.py
@@ -76,10 +95,48 @@ test.py
 test.ipynb
 test.json
 
-# PyInstaller
-bundle/
-*.spec
+# Verification output (sample HTML/PNG captures)
+verification_output/
 
-# uv
-pyvenv.cfg
-uv.lock
+# One-off export/check scripts
+check_chaka*.py
+check_dist_field.py
+check_odia_db.py
+check_cuttack_chaka.py
+inspect_cuttack_type2.py
+scan_dbs.py
+show_all_districts.py
+show_progress.py
+verify_jajpur.py
+verify_s3.py
+verify_districts.py
+export_anugul.py
+export_district.py
+export_district_zip.py
+export_all_to_s3.py
+
+# Fleet ops scripts (not needed for repo)
+Scripts/archive/
+Scripts/_fleet_*.py
+Scripts/fleet_progress.py
+Scripts/quick_status.py
+Scripts/setup_git_fleet.py
+Scripts/check_*.sh
+Scripts/do_export.sh
+Scripts/fix_fleet09.sh
+
+# Misc junk
+Untitled
+commands.txt
+districts.txt
+MyReport.pdf
+README_SETUP.txt
+*.cmd
+scraper_logs.txt
+kandhamal_gaps.csv
+FLEET_STATUS.md
+BEST_PRACTICES.md
+
+# Priority / config JSONs (instance-specific)
+district_priority.*.json
+villages_r5_2.json

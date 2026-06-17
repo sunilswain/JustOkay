@@ -481,6 +481,108 @@ def reclaim_stuck_villages(db_path: str) -> int:
         return cur.rowcount
 
 
+def reclaim_stale_in_progress(
+    db_path: str,
+    max_age_seconds: int = CLAIM_TIMEOUT_SECONDS,
+) -> int:
+    """
+    Release in_progress villages whose heartbeat is older than max_age_seconds.
+
+    Unlike the reclaim inside claim_village (which only fires when a new claim
+    is made), this can be called on a timer from auto_verify / http_scraper so
+    orphaned villages are unstuck even when no new work is being claimed.
+    """
+    cutoff = _now_minus(max_age_seconds)
+    with _conn(db_path) as con:
+        cur = con.execute("""
+            UPDATE villages
+            SET    status     = 'pending',
+                   worker_id  = NULL,
+                   claimed_at = NULL
+            WHERE  status = 'in_progress'
+            AND    claimed_at < ?
+        """, (cutoff,))
+        return cur.rowcount
+
+
+def reconcile_done_villages(
+    db_path: str,
+    data_dir: str,
+    tolerance: float = 0.90,
+    district_codes: Optional[list] = None,
+) -> int:
+    """
+    Cross-check 'done' villages against actual khatiyans stored in district DBs.
+
+    For each done village where actual_khatiyans < expected * tolerance,
+    reset the village to 'pending' so it gets re-scraped.
+
+    This is the fix for the false-done drift: a worker that crashed after
+    writing partial data but before completing properly may have marked the
+    village done with too few khatiyans.
+
+    Returns the number of villages reset.
+    """
+    import glob as _glob
+
+    root = Path(data_dir)
+    reset_count = 0
+
+    # Build a map of village_name -> actual khatiyan count from district DBs
+    village_actual: dict = {}
+    for db_file in sorted(root.glob("district_*.db")):
+        if "work_queue" in db_file.name or "backup" in db_file.name:
+            continue
+        try:
+            with _conn(str(db_file)) as dcon:
+                for vname, cnt in dcon.execute(
+                    "SELECT village, COUNT(*) FROM khatiyans GROUP BY village"
+                ).fetchall():
+                    village_actual[vname] = village_actual.get(vname, 0) + cnt
+        except Exception:
+            pass
+
+    if not village_actual:
+        return 0
+
+    filter_sql = ""
+    params: list = []
+    if district_codes:
+        placeholders = ",".join("?" * len(district_codes))
+        filter_sql = f" AND district_code IN ({placeholders})"
+        params = list(district_codes)
+
+    with _conn(db_path) as con:
+        done_villages = con.execute(
+            f"""SELECT id, village_name, khatiyan_count
+                FROM villages
+                WHERE status = 'done'
+                AND khatiyan_count > 5
+                {filter_sql}""",
+            params,
+        ).fetchall()
+
+        ids_to_reset = []
+        for vid, vname, expected in done_villages:
+            actual = village_actual.get(vname, 0)
+            if actual < expected * tolerance:
+                ids_to_reset.append(vid)
+
+        if ids_to_reset:
+            placeholders = ",".join("?" * len(ids_to_reset))
+            con.execute(
+                f"""UPDATE villages
+                    SET status = 'pending', worker_id = NULL,
+                        claimed_at = NULL, khatiyans_fetched = 0,
+                        last_khatiyan_no = NULL
+                    WHERE id IN ({placeholders})""",
+                ids_to_reset,
+            )
+            reset_count = len(ids_to_reset)
+
+    return reset_count
+
+
 def reset_errors(db_path: str) -> int:
     """Reset all error villages back to pending for a fresh retry."""
     return reset_errors_for_districts(db_path, district_codes=None)

@@ -166,11 +166,16 @@ def _read_sqlite(db_path: Path, sort: bool = True) -> Iterator[dict]:
     con = sqlite3.connect(str(db_path))
     try:
         records = []
-        for row in con.execute("SELECT data_json FROM khatiyans ORDER BY id"):
-            try:
-                records.append(json.loads(row[0]))
-            except json.JSONDecodeError:
-                pass
+        try:
+            for row in con.execute("SELECT data_json FROM khatiyans ORDER BY id"):
+                try:
+                    records.append(json.loads(row[0]))
+                except json.JSONDecodeError:
+                    pass
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+            print(f"  Skipping {db_path.name}: {e}", file=sys.stderr)
+            con.close()
+            return
     finally:
         con.close()
 
@@ -232,11 +237,29 @@ def iter_all_records(
             records = _read_ndjson(path)   # ndjson stays unsorted for now
 
         for record in records:
-            # Optional district filter (match on district_code or district name)
+            # Optional district filter (match on district_code, dCode, or district text)
             if district_filter:
                 d_code = record.get("district_code") or record.get("dCode")
                 if d_code is not None and int(d_code) not in district_filter:
                     continue
+                elif d_code is None:
+                    dist_text = str(record.get("district", ""))
+                    matched = False
+                    for dc in district_filter:
+                        if f'District-{dc}' in dist_text:
+                            matched = True
+                            break
+                        if dc == 3 and '\u0b15\u0b1f\u0b15' in dist_text:
+                            matched = True
+                            break
+                        if dc == 14 and '\u0b05\u0b28' in dist_text:
+                            matched = True
+                            break
+                        if dc == 18 and ('\u0b2f\u0b3e\u0b1c' in dist_text or '\u0b1c\u0b3e\u0b1c' in dist_text):
+                            matched = True
+                            break
+                    if not matched and dist_text:
+                        continue
             yield record
 
 

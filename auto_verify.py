@@ -29,7 +29,11 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from work_queue import requeue_district_for_verifier
+from work_queue import (
+    requeue_district_for_verifier,
+    reclaim_stale_in_progress,
+    reconcile_done_villages,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -483,6 +487,15 @@ async def daemon_loop(
                         best["district_code"], best["district_name"], best["pct"],
                         best["pending"], best["in_progress"], best["errors"],
                     )
+            # Drift fixes: run every loop iteration
+            stale = reclaim_stale_in_progress(db_path)
+            if stale:
+                log.info("Drift fix: reclaimed %d stale in_progress villages", stale)
+
+            reset = reconcile_done_villages(db_path, data_dir)
+            if reset:
+                log.warning("Drift fix: reset %d false-done villages (under-collected)", reset)
+
         except Exception as e:
             log.error("Daemon loop error: %s", e)
 

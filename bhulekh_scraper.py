@@ -46,6 +46,7 @@ import random
 from datetime import date
 
 from storage import create_storage, BhulekhStorageBase, DEFAULT_DATA_DIR
+from ror_parser import parse_ror_html
 
 # Expiry: program will refuse to run after this date (useful for .exe builds).
 # Set to None to disable expiry check.
@@ -76,6 +77,11 @@ SELECTOR_DISTRICT = 'select#ctl00_ContentPlaceHolder1_ddlDistrict, select[id*="d
 SELECTOR_TAHASIL = 'select#ctl00_ContentPlaceHolder1_ddlTahsil, select[id*="ddlTahsil"]'
 SELECTOR_VILLAGE = 'select#ctl00_ContentPlaceHolder1_ddlVillage, select[id*="ddlVillage"]'
 SELECTOR_KHATIYAN = 'select#ctl00_ContentPlaceHolder1_ddlBindData, select[id*="ddlBindData"]'
+# RoR view page markers (Type-1/2 and common landlord/tenant fields)
+SELECTOR_ROR_VIEW_READY = (
+    "#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack, "
+    "[id*='lblBhuswami'], [id*='lblRaiyat']"
+)
 # Khatiyan radio can be disabled until District/Tahasil are selected
 SELECTOR_RADIO_KHATIYAN = 'input#ctl00_ContentPlaceHolder1_rbtnRORSearchtype_0, input[value="Khatiyan"][name*="rbtnRORSearchtype"]'
 
@@ -392,6 +398,28 @@ _DROPDOWN_STABLE_INTERVAL_S = 0.5
 
 # Minimum fraction of expected khatiyans that must be saved before marking done.
 _COMPLETION_MIN_FRACTION = 0.5
+
+
+def _checkpoint_looks_corrupt(
+    last_khatiyan_no: Optional[str],
+    khatiyans_fetched: int,
+    expected_count: int,
+) -> bool:
+    """
+    Detect resume checkpoints that would skip to end-of-dropdown while
+    khatiyans_fetched is still far below expected (infinite retry loop).
+    """
+    if not last_khatiyan_no or expected_count <= 0 or khatiyans_fetched <= 0:
+        return False
+    if khatiyans_fetched >= expected_count * _COMPLETION_MIN_FRACTION:
+        return False
+    try:
+        # Handles values like '205/255' as well as plain '58'
+        kh_num = int(str(last_khatiyan_no).split("/")[0].strip())
+    except (ValueError, AttributeError):
+        return False
+    # Checkpoint claims we finished a late khatiyan but saved very few records
+    return kh_num >= expected_count * 0.85
 
 
 class BhulekhScraper:
@@ -1029,6 +1057,72 @@ class BhulekhScraper:
             f"(last count: {final_count}, expected: {expected_count})"
         )
 
+    async def wait_for_khatiyan_selector_ready(
+        self,
+        *,
+        min_options: int = 1,
+        timeout_ms: int = 12000,
+    ) -> bool:
+        """
+        Fast wait after Khatiyan Page back-navigation.
+
+        District/tahasil/village/khatiyan dropdowns stay populated on the search
+        form — no need for networkidle. Wait until ddlBindData is visible with
+        real options.
+        """
+        try:
+            await self.page.wait_for_selector(
+                SELECTOR_KHATIYAN, state="visible", timeout=timeout_ms,
+            )
+            deadline = time.time() + (timeout_ms / 1000)
+            interval = max(0.05, 0.1 * self.delay_scale)
+            while time.time() < deadline:
+                if await self.check_for_timeout_error():
+                    raise Exception("Website timeout error detected")
+                if len(await self.get_dropdown_options(SELECTOR_KHATIYAN)) >= min_options:
+                    await self.human_delay(0.05, 0.15)
+                    return True
+                await asyncio.sleep(interval)
+            logger.warning(
+                "Khatiyan selector visible but <%d options within %dms",
+                min_options, timeout_ms,
+            )
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning("Khatiyan selector not visible within %dms", timeout_ms)
+            return False
+        except Exception as e:
+            logger.warning("wait_for_khatiyan_selector_ready failed: %s", e)
+            return False
+
+    async def wait_for_ror_view_ready(
+        self,
+        *,
+        timeout_ms: int = 12000,
+    ) -> bool:
+        """
+        Fast wait after View RoR — wait for RoR content markers, not networkidle.
+        """
+        try:
+            if await self.check_for_timeout_error():
+                raise Exception("Website timeout error detected")
+            await self.page.wait_for_selector(
+                SELECTOR_ROR_VIEW_READY, state="visible", timeout=timeout_ms,
+            )
+            await self.human_delay(0.05, 0.15)
+            return True
+        except PlaywrightTimeoutError:
+            try:
+                if await self._is_form20_ror():
+                    logger.info("Form-20 RoR layout detected (fast wait)")
+                    return True
+            except Exception:
+                pass
+            return False
+        except Exception as e:
+            logger.warning("wait_for_ror_view_ready failed: %s", e)
+            return False
+
     async def get_dropdown_options(self, selector: str) -> List[Dict[str, str]]:
         """Get all options from a dropdown.
         
@@ -1232,6 +1326,23 @@ class BhulekhScraper:
         Automatically detects Form-20 (survey/settlement), Type-1 (gvfront GridView),
         or Type-2 (ପରିଶିଷ୍ଟ / Form 99) and uses the appropriate extractor.
         """
+        try:
+            html = await self.page.content()
+            parsed = parse_ror_html(html)
+            plot_count = len(parsed.get("plots", []))
+            header_fields = sum(
+                1 for k, v in parsed.items()
+                if k not in ("plots", "ror_type") and v
+            )
+            if plot_count > 0 or header_fields >= 3:
+                logger.info(
+                    "Extracted via ror_parser: type=%s, %d plots, %d header fields",
+                    parsed.get("ror_type"), plot_count, header_fields,
+                )
+                return parsed
+        except Exception as e:
+            logger.warning("ror_parser extraction failed, using legacy extractors: %s", e)
+
         try:
             if await self._is_form20_ror():
                 logger.info("Detected Form-20 RoR layout (survey/settlement)")
@@ -1585,51 +1696,80 @@ class BhulekhScraper:
         return plots
     
     async def click_view_ror(self):
-        """Click the View RoR button with human-like behavior."""
+        """Click the View RoR button and wait for RoR content (not networkidle)."""
         try:
             button = self.page.locator('input[id*="btnRORFront"]')
             await button.hover()
             await self.human_delay(0.15, 0.4)
-            
-            # Click the button
+
             await button.click()
-            await self.wait_for_page_load()
-            
-            # Check for timeout error
+
+            try:
+                await self.page.wait_for_load_state("domcontentloaded", timeout=8000)
+            except PlaywrightTimeoutError:
+                pass
+
+            if await self.wait_for_ror_view_ready():
+                logger.info("Clicked View RoR button")
+                return
+
+            logger.warning(
+                "RoR view not ready after click — falling back to full page load",
+            )
+            await self.wait_for_page_load(timeout=15000)
+
             if await self.check_for_timeout_error():
                 raise Exception("Timeout error after clicking View RoR")
-            
-            logger.info("Clicked View RoR button")
+
+            if await self.wait_for_ror_view_ready(timeout_ms=8000):
+                logger.info("Clicked View RoR button (fallback load)")
+                return
+
+            raise Exception("RoR view did not load after View RoR click")
         except Exception as e:
             logger.error(f"Error clicking View RoR button: {e}")
             raise
     
     async def click_khatiyan_page(self):
-        """Click the Khatiyan Page button to go back."""
+        """Click the Khatiyan Page button to go back to the khatiyan selector."""
         try:
-            # Wait for button to be available
             await self.page.wait_for_selector('input[id="btnKhatiyan"]', timeout=10000)
-            
+
             button = self.page.locator('input[id="btnKhatiyan"]')
             await button.hover()
             await self.human_delay(0.15, 0.35)
-            
+
             await button.click()
-            await self.wait_for_page_load()
-            
+
+            # Fast path: dropdowns remain populated after back — skip networkidle.
+            try:
+                await self.page.wait_for_load_state("domcontentloaded", timeout=8000)
+            except PlaywrightTimeoutError:
+                pass
+
+            if await self.wait_for_khatiyan_selector_ready():
+                logger.info("Clicked Khatiyan Page button (back)")
+                return
+
+            logger.warning(
+                "Khatiyan selector not ready after back — falling back to full page load",
+            )
+            await self.wait_for_page_load(timeout=15000)
+
             if await self.check_for_timeout_error():
-                logger.warning("Timeout error after clicking Khatiyan Page, navigating to main page...")
+                logger.warning(
+                    "Timeout error after clicking Khatiyan Page, navigating to main page...",
+                )
                 await self.navigate_to_ror_page()
                 return
-            
-            await self.human_delay(0.3, 0.6)
-            logger.info("Clicked Khatiyan Page button (back)")
+
+            await self.human_delay(0.2, 0.4)
+            logger.info("Clicked Khatiyan Page button (back, fallback load)")
         except Exception as e:
             logger.error(f"Error clicking Khatiyan Page button: {e}")
-            # Try to navigate back to the main page if button click fails
             try:
                 await self.navigate_to_ror_page()
-            except:
+            except Exception:
                 raise
     
     async def _reselect_district_tahasil_village(self, tahasil_value: str, village_value: str) -> None:
@@ -1701,10 +1841,7 @@ class BhulekhScraper:
                 await self.human_delay(0.3, 0.6)
                 
                 await self.click_view_ror()
-                
-                await self.wait_for_page_load()
-                await self.human_delay(0.4, 0.7)
-                
+
                 # Check for timeout error before extracting
                 if await self.check_for_timeout_error():
                     if attempt < max_retries - 1:
@@ -1727,13 +1864,12 @@ class BhulekhScraper:
                 front_loaded = False
                 try:
                     await self.page.wait_for_selector(
-                        "#gvfront_ctl02_lblMouja, #gvfront, #gvRorFront, #gvRorBack, "
-                        "[id*='lblBhuswami'], [id*='lblRaiyat']",
-                        state="visible", timeout=15000,
+                        SELECTOR_ROR_VIEW_READY,
+                        state="visible", timeout=5000,
                     )
                     front_loaded = True
                 except Exception as e:
-                    logger.warning(f"Front page elements not found after 15s: {e}")
+                    logger.warning(f"Front page elements not found after 5s: {e}")
 
                 if not front_loaded:
                     try:
@@ -1872,8 +2008,6 @@ class BhulekhScraper:
                         khatiyan_text,
                     )
                     await self.click_khatiyan_page()
-                    await self.wait_for_page_load()
-                    await self.human_delay(0.3, 0.6)
                     return False
                 
                 # Persistent storage: append immediately so no data loss on crash.
@@ -1906,9 +2040,6 @@ class BhulekhScraper:
                     logger.info(f"File updated: {total} record(s) in bhulekh_data.json / bhulekh_data.csv")
                 
                 await self.click_khatiyan_page()
-                await self.wait_for_page_load()
-                await self.human_delay(0.3, 0.6)
-                
                 return True
                 
             except Exception as e:
@@ -1936,7 +2067,8 @@ class BhulekhScraper:
                              district: str, tahasil: str,
                              tahasil_value: str = "",
                              start_after_khatiyan_value: Optional[str] = None,
-                             expected_khatiyan_count: Optional[int] = None) -> bool:
+                             expected_khatiyan_count: Optional[int] = None,
+                             skip_khatiyan_values: Optional[set] = None) -> bool:
         """Process all Khatiyans in a village."""
         try:
             # Select village (triggers postback; Khatiyan dropdown will populate)
@@ -1965,10 +2097,39 @@ class BhulekhScraper:
                         logger.info(f"Resuming after Khatiyan value {start_after_khatiyan_value!r}; skipping {start_index} khatiyans")
                         break
 
-            logger.info(f"Processing {len(khatiyan_options) - start_index} Khatiyans for village: {village_text}")
+            skipped_existing = 0
+            if skip_khatiyan_values:
+                logger.info(
+                    "Village %s: %d khatiyans already in DB, will skip them",
+                    village_text, len(skip_khatiyan_values),
+                )
+
+            slice_options = khatiyan_options[start_index:]
+            if skip_khatiyan_values:
+                slice_options = [
+                    k for k in slice_options
+                    if (k.get("value") or "") not in skip_khatiyan_values
+                ]
+            # Position resume can overshoot: checkpoint at end while gaps remain earlier.
+            if not slice_options and skip_khatiyan_values and start_index > 0:
+                slice_options = [
+                    k for k in khatiyan_options
+                    if (k.get("value") or "") not in skip_khatiyan_values
+                ]
+                if slice_options:
+                    logger.warning(
+                        "Village %s: position resume left 0 work but %d khatiyans missing — "
+                        "rescanning dropdown by value",
+                        village_text, len(slice_options),
+                    )
+
+            logger.info(
+                "Processing %d Khatiyans for village: %s",
+                len(slice_options), village_text,
+            )
 
             # Process each Khatiyan
-            for khatiyan in khatiyan_options[start_index:]:
+            for khatiyan in slice_options:
                 if self.limit_khatiyans is not None and self.khatiyans_processed >= self.limit_khatiyans:
                     break
                 # Re-select village if needed (after coming back from RoR page)
@@ -2497,6 +2658,23 @@ class BhulekhScraper:
 
                 # Count khatiyans already done for this village (from previous attempt)
                 already_done = village_info.get("khatiyans_fetched", 0) or 0
+                expected_kh = village_info.get("khatiyan_count") or 0
+
+                # Corrupt checkpoint: last_khatiyan_no near end but count still low →
+                # resume skips all khatiyans, fails threshold, retries forever.
+                if resume_kh and _checkpoint_looks_corrupt(resume_kh, already_done, expected_kh):
+                    logger.warning(
+                        "Worker %s: clearing corrupt checkpoint for %s "
+                        "(last_khatiyan=%r, fetched=%d, expected=%d)",
+                        worker_id, vil_name, resume_kh, already_done, expected_kh,
+                    )
+                    _checkpoint(v_id, already_done, "")
+                    resume_kh = None
+
+                # Scale per-village timeout for large villages (545 khatiyans need >20 min)
+                village_timeout = _VILLAGE_TIMEOUT
+                if expected_kh > 100:
+                    village_timeout = max(_VILLAGE_TIMEOUT, expected_kh * 4)
 
                 # Heartbeat task so the village isn't reclaimed while we work
                 async def _heartbeat_loop():
@@ -2520,7 +2698,6 @@ class BhulekhScraper:
                 cp_task = asyncio.create_task(_checkpoint_loop())
                 try:
                     # Hard per-village timeout — if the site hangs, abort & move on
-                    expected_kh = village_info.get("khatiyan_count") or None
                     await asyncio.wait_for(
                         self.process_village(
                             village_value=vil_code,
@@ -2529,13 +2706,13 @@ class BhulekhScraper:
                             tahasil=tah_name,
                             tahasil_value=tah_code,
                             start_after_khatiyan_value=resume_kh,
-                            expected_khatiyan_count=expected_kh,
+                            expected_khatiyan_count=expected_kh or None,
                         ),
-                        timeout=_VILLAGE_TIMEOUT,
+                        timeout=village_timeout,
                     )
                 except asyncio.TimeoutError:
                     raise Exception(
-                        f"Village timed out after {_VILLAGE_TIMEOUT}s — site likely unresponsive"
+                        f"Village timed out after {village_timeout}s — site likely unresponsive"
                     )
                 finally:
                     hb_task.cancel()
@@ -2555,6 +2732,14 @@ class BhulekhScraper:
                     )
                     _fail(v_id, f"0 khatiyans saved (expected {expected}) — likely storage error")
                 elif expected > 0 and kh_done < min_required:
+                    # 0 new khatiyans this run + resume checkpoint → stuck loop; clear it.
+                    if self.khatiyans_processed == 0 and resume_kh:
+                        logger.warning(
+                            "Worker %s: village %s made no progress with resume "
+                            "checkpoint %r (%d/%d saved) — clearing checkpoint.",
+                            worker_id, vil_name, resume_kh, kh_done, expected,
+                        )
+                        _checkpoint(v_id, kh_done, "")
                     logger.error(
                         "Worker %s: village %s saved only %d/%d khatiyans (<%d%% threshold) — "
                         "marking as FAILED so it will be retried.",
